@@ -64,6 +64,24 @@ mod implementation {
         }
     }
 
+    pub fn record_interval(
+        name: &'static str,
+        start: Instant,
+        duration: std::time::Duration,
+        amount: u64,
+    ) {
+        if let Some(origin) = origin() {
+            SAMPLES.with_borrow_mut(|samples| {
+                samples.push(Sample {
+                    name,
+                    start_ns: start.saturating_duration_since(origin).as_nanos() as u64,
+                    duration_ns: duration.as_nanos() as u64,
+                    amount,
+                })
+            });
+        }
+    }
+
     pub fn record(name: &'static str, amount: u64) {
         if let Some(origin) = origin() {
             let start_ns = origin.elapsed().as_nanos() as u64;
@@ -112,4 +130,6 @@ mod implementation {
     pub fn flush() {}
 }
 
+#[cfg(feature = "shared-fontique")]
+pub use implementation::record_interval;
 pub use implementation::{Span, enabled, flush, record};

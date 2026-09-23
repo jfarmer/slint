@@ -201,7 +201,9 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
         window_attributes: winit::window::WindowAttributes,
         _window_adapter_weak: std::rc::Weak<crate::winitwindowadapter::WinitWindowAdapter>,
     ) -> Result<Arc<winit::window::Window>, PlatformError> {
+        let _resume_span = i_slint_common::startup_trace::Span::new("winit.skia_resume");
         let transparent = window_attributes.transparent;
+        let create_span = i_slint_common::startup_trace::Span::new("winit.native_window_create");
         let winit_window = Arc::new(active_event_loop.create_window(window_attributes).map_err(
             |winit_os_error| {
                 PlatformError::from(format!(
@@ -211,6 +213,7 @@ impl super::WinitCompatibleRenderer for WinitSkiaRenderer {
             },
         )?);
 
+        drop(create_span);
         let size = winit_window.surface_size();
 
         self.renderer.set_window_handle(

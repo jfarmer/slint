@@ -30,6 +30,7 @@ impl RevealOnFirstFrame {
     pub(crate) fn new(winit_window: &winit::window::Window) -> Option<Self> {
         let ns_window = ns_view(winit_window)?.window()?;
         let alpha = ns_window.alphaValue();
+        let _span = i_slint_common::startup_trace::Span::new("appkit.hide_initial_frame");
         ns_window.setAlphaValue(0.0);
         Some(Self { ns_window, alpha })
     }
@@ -37,6 +38,7 @@ impl RevealOnFirstFrame {
 
 impl Drop for RevealOnFirstFrame {
     fn drop(&mut self) {
+        let _span = i_slint_common::startup_trace::Span::new("appkit.reveal_first_frame");
         self.ns_window.setAlphaValue(self.alpha);
     }
 }

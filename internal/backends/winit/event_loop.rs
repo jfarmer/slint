@@ -98,6 +98,7 @@ impl EventLoopState {
 
 impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _span = i_slint_common::startup_trace::Span::new("winit.resumed");
         if matches!(
             self.custom_application_handler
                 .as_mut()
@@ -144,6 +145,21 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
             return;
         }
 
+        match &event {
+            WindowEvent::RedrawRequested => {
+                i_slint_common::startup_trace::record("winit.redraw_event", 1)
+            }
+            WindowEvent::Occluded(value) => {
+                i_slint_common::startup_trace::record("winit.occluded_event", u64::from(*value))
+            }
+            WindowEvent::Focused(value) => {
+                i_slint_common::startup_trace::record("winit.focused_event", u64::from(*value))
+            }
+            WindowEvent::Resized(_) => {
+                i_slint_common::startup_trace::record("winit.resized_event", 1)
+            }
+            _ => (),
+        }
         let result = window.dispatch_winit_window_event(event_loop, &winit_window, &event);
 
         // A window hidden during the dispatch looks kept alive until this reference is gone.
@@ -211,6 +227,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
     }
 
     fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
+        i_slint_common::startup_trace::record("winit.new_events", 1);
         if matches!(
             self.custom_application_handler.as_mut().map_or(EventResult::Propagate, |handler| {
                 handler.new_events(event_loop, cause)
@@ -226,6 +243,7 @@ impl winit::application::ApplicationHandler<SlintEvent> for EventLoopState {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _span = i_slint_common::startup_trace::Span::new("winit.about_to_wait");
         self.shared_backend_data.flush_pending_mouse_move();
         // For the windows hidden outside of a window event, from a timer for example.
         self.shared_backend_data.warn_about_windows_kept_alive();

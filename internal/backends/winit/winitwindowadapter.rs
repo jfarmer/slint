@@ -625,6 +625,7 @@ impl WinitWindowAdapter {
             }
         }
 
+        let _ensure_span = i_slint_common::startup_trace::Span::new("winit.ensure_window");
         // Never show the window right away, as we
         //  a) need to compute the correct size based on the scale factor before it's shown on the screen (handled by set_visible)
         //  b) need to create the accesskit adapter before it's shown on the screen, as required by accesskit.
@@ -872,6 +873,7 @@ impl WinitWindowAdapter {
 
     /// Draw the items of the specified `component` in the given window.
     pub fn draw(&self) -> Result<(), PlatformError> {
+        let _span = i_slint_common::startup_trace::Span::new("winit.adapter_draw");
         if matches!(self.shown.get(), WindowVisibility::Hidden) {
             return Ok(()); // caller bug, doesn't make sense to call draw() when not shown
         }
@@ -1752,7 +1754,10 @@ impl WinitWindowAdapter {
                 }
             }
 
-            winit_window.set_visible(true);
+            {
+                let _span = i_slint_common::startup_trace::Span::new("winit.set_native_visible");
+                winit_window.set_visible(true);
+            }
 
             // X11 and Windows discard what is drawn into a window that isn't mapped,
             // which the buffer age a software surface reports doesn't account for.
@@ -1919,6 +1924,10 @@ impl WindowAdapter for WinitWindowAdapter {
     }
 
     fn request_redraw(&self) {
+        i_slint_common::startup_trace::record(
+            "winit.request_redraw",
+            u64::from(self.pending_redraw.get()),
+        );
         if !self.pending_redraw.replace(true)
             && let WinitWindowOrNone::HasWindow { window, frame_throttle, .. } =
                 &*self.winit_window_or_none.borrow()

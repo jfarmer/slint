@@ -32,6 +32,7 @@ define_class!(
     impl DisplayLinkTarget {
         #[unsafe(method(tick:))]
         fn tick(&self, display_link: &CADisplayLink) {
+            let _span = i_slint_common::startup_trace::Span::new("appkit.display_link_tick");
             let Some(adapter) = self.ivars().window_adapter.upgrade() else {
                 // The window is gone, so there is nothing for this display link to drive.
                 return;
@@ -77,6 +78,7 @@ impl Drop for CADisplayLinkFrameThrottle {
 impl super::FrameThrottle for CADisplayLinkFrameThrottle {
     fn request_throttled_redraw(&self, winit_window: &winit::window::Window) {
         request_screen_frame_rate(&self.display_link, winit_window);
+        let _span = i_slint_common::startup_trace::Span::new("appkit.display_link_unpause");
         self.display_link.setPaused(false);
     }
 }
