@@ -21,7 +21,7 @@ use glow::HasContext;
 use super::{Command, CommandType, FanIndices, Params, RenderTarget, Renderer, ShaderType, SurfacelessRenderer};
 
 mod program;
-use program::MainProgram;
+use program::{MainProgram, ProgramSlot};
 
 mod gl_texture;
 use gl_texture::GlTexture;
@@ -42,9 +42,9 @@ pub struct OpenGl {
     view: [f32; 2],
     screen_view: [f32; 2],
     // All types of the vertex/fragment shader, indexed by shader_type when has_glyph_texture is true
-    main_programs_with_glyph_texture: [Option<MainProgram>; 18],
+    main_programs_with_glyph_texture: [Option<ProgramSlot>; 18],
     // Same shader programs but with has_glyph_texture being false
-    main_programs_without_glyph_texture: [Option<MainProgram>; 18],
+    main_programs_without_glyph_texture: [Option<ProgramSlot>; 18],
     // The programs of draws under a clip shape, by shader type and glyph texture use, each built when first drawn
     // with (None if that failed): no other program evaluates a shape, and few of them are ever drawn under one.
     clip_programs: FnvHashMap<(u8, bool, (bool, bool)), Option<MainProgram>>,
@@ -133,21 +133,45 @@ impl OpenGl {
         let antialias = true;
 
         let context = Rc::new(context);
+        if std::env::var("SLINT_TRACE_RENDERER_STARTUP").as_deref() == Ok("1") {
+            let version = context.version();
+            let program_binary = context.supported_extensions().contains("GL_ARB_get_program_binary")
+                || context.supported_extensions().contains("GL_OES_get_program_binary")
+                || (!version.is_embedded && (version.major, version.minor) >= (4, 1))
+                || (version.is_embedded && version.major >= 3);
+            let formats = if program_binary {
+                unsafe { context.get_parameter_i32(glow::NUM_PROGRAM_BINARY_FORMATS) }
+            } else {
+                0
+            };
+            unsafe {
+                eprintln!(
+                    "slint-poc-gl {:?} {:?} binary_formats={}",
+                    context.get_parameter_string(glow::VERSION),
+                    context.get_parameter_string(glow::RENDERER),
+                    formats
+                );
+            }
+        }
         // What the driver can allocate; a VideoCore IV reports 2048.
         let max_texture_size = match unsafe { context.get_parameter_i32(glow::MAX_TEXTURE_SIZE) } {
             size if size > 0 => size as usize,
             _ => 2048,
         };
 
+        let lazy = std::env::var("SLINT_LAZY_SHADERS").as_deref() == Ok("1");
+        let make_program = |context: &Rc<glow::Context>, antialias, shader_type, glyph| {
+            ProgramSlot::new(context, antialias, shader_type, glyph, lazy)
+        };
         let generate_shader_program_variants = |with_glyph_texture| -> Result<_, ErrorKind> {
             Ok([
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillGradient,
                     with_glyph_texture,
                 )?),
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillImage,
@@ -157,9 +181,9 @@ impl OpenGl {
                     // No stencil fill with glyph texture
                     None
                 } else {
-                    Some(MainProgram::new(&context, antialias, ShaderType::Stencil, false)?)
+                    Some(make_program(&context, antialias, ShaderType::Stencil, false)?)
                 },
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillImageGradient,
@@ -169,9 +193,9 @@ impl OpenGl {
                     // Image filter is unrelated to glyph rendering
                     None
                 } else {
-                    Some(MainProgram::new(&context, antialias, ShaderType::FilterImage, false)?)
+                    Some(make_program(&context, antialias, ShaderType::FilterImage, false)?)
                 },
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillColor,
@@ -181,7 +205,7 @@ impl OpenGl {
                     // Texture blitting is unrelated to glyph rendering
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::TextureCopyUnclipped,
@@ -189,13 +213,13 @@ impl OpenGl {
                     )?)
                 },
                 None,
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillGradientConic,
                     with_glyph_texture,
                 )?),
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillImageGradientConic,
@@ -205,20 +229,20 @@ impl OpenGl {
                     // Image filter is unrelated to glyph rendering
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageColorMatrix,
                         false,
                     )?)
                 },
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillGradientTwoPointRadial,
                     with_glyph_texture,
                 )?),
-                Some(MainProgram::new(
+                Some(make_program(
                     &context,
                     antialias,
                     ShaderType::FillImageGradientTwoPointRadial,
@@ -227,7 +251,7 @@ impl OpenGl {
                 if with_glyph_texture {
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageTurbulence,
@@ -237,7 +261,7 @@ impl OpenGl {
                 if with_glyph_texture {
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageTransfer,
@@ -247,7 +271,7 @@ impl OpenGl {
                 // The blend pass samples its backdrop through the glyph
                 // texture, so it only exists in that variant.
                 if with_glyph_texture {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageBlend,
@@ -259,7 +283,7 @@ impl OpenGl {
                 if with_glyph_texture {
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageMorphology,
@@ -269,7 +293,7 @@ impl OpenGl {
                 if with_glyph_texture {
                     None
                 } else {
-                    Some(MainProgram::new(
+                    Some(make_program(
                         &context,
                         antialias,
                         ShaderType::FilterImageOffset,
@@ -1166,6 +1190,7 @@ impl OpenGl {
         programs[self.current_program as usize]
             .as_ref()
             .expect("internal error: invalid shader program selected for given paint")
+            .get()
     }
 
     /// Whether the program for `params` under `clips` - a clip shape, a coverage mask - is there, building it when

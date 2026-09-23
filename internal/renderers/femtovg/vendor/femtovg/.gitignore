@@ -16,3 +16,6 @@ examples/generated
 Cargo.lock
 
 .vscode
+
+# Local crates.io extraction marker
+/.cargo-ok

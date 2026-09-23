@@ -139,6 +139,50 @@ pub struct MainProgram {
     loc_glyphtex: Option<<glow::Context as glow::HasContext>::UniformLocation>,
     loc_cliptex: Option<<glow::Context as glow::HasContext>::UniformLocation>,
     loc_frag: Option<<glow::Context as glow::HasContext>::UniformLocation>,
+    startup_trace: bool,
+    shader_type: u8,
+    with_glyph_texture: bool,
+    used: std::cell::Cell<bool>,
+}
+
+// PoC: retain every shader variant, but optionally compile it on first access.
+// The normal eager path still reports compilation errors from renderer creation.
+#[derive(Debug)]
+pub struct ProgramSlot {
+    program: std::cell::OnceCell<MainProgram>,
+    context: Rc<glow::Context>,
+    antialias: bool,
+    shader_type: ShaderType,
+    with_glyph_texture: bool,
+}
+
+impl ProgramSlot {
+    pub fn new(
+        context: &Rc<glow::Context>,
+        antialias: bool,
+        shader_type: ShaderType,
+        with_glyph_texture: bool,
+        lazy: bool,
+    ) -> Result<Self, ErrorKind> {
+        let program = std::cell::OnceCell::new();
+        if !lazy {
+            let _ = program.set(MainProgram::new(context, antialias, shader_type, with_glyph_texture)?);
+        }
+        Ok(Self {
+            program,
+            context: context.clone(),
+            antialias,
+            shader_type,
+            with_glyph_texture,
+        })
+    }
+
+    pub fn get(&self) -> &MainProgram {
+        self.program.get_or_init(|| {
+            MainProgram::new(&self.context, self.antialias, self.shader_type, self.with_glyph_texture)
+                .expect("PoC: shader compilation failed on first use")
+        })
+    }
 }
 
 impl MainProgram {
@@ -170,6 +214,8 @@ impl MainProgram {
         with_glyph_texture: bool,
         (with_clip_shape, with_clip_mask): (bool, bool),
     ) -> Result<Self, ErrorKind> {
+        let startup_trace = std::env::var("SLINT_TRACE_RENDERER_STARTUP").as_deref() == Ok("1");
+        let started = std::time::Instant::now();
         let shader_defs = if antialias { "#define EDGE_AA 1" } else { "" };
         let select_shader_type = format!(
             "#define SELECT_SHADER {}\n{}\n{}\n{}",
@@ -192,16 +238,33 @@ impl MainProgram {
             include_str!("filters.glsl")
         );
 
+        let source_ready = std::time::Instant::now();
         let vert_shader = Shader::new(context, &vert_shader_src, glow::VERTEX_SHADER)?;
+        let vertex_ready = std::time::Instant::now();
         let frag_shader = Shader::new(context, &frag_shader_src, glow::FRAGMENT_SHADER)?;
+        let fragment_ready = std::time::Instant::now();
 
         let program = Program::new(context, &[vert_shader, frag_shader], &["vertex", "tcoord"])?;
+        let linked = std::time::Instant::now();
 
         let loc_viewsize = program.uniform_location("viewSize").unwrap();
         let loc_tex = program.uniform_location("tex");
         let loc_glyphtex = program.uniform_location("glyphtex");
         let loc_cliptex = program.uniform_location("cliptex");
         let loc_frag = program.uniform_location("frag");
+        let ready = std::time::Instant::now();
+        if startup_trace {
+            eprintln!(
+                "slint-poc-program {} {} {:.6} {:.6} {:.6} {:.6} {:.6}",
+                shader_type.to_u8(),
+                with_glyph_texture,
+                (vertex_ready - source_ready).as_secs_f64() * 1000.0,
+                (fragment_ready - vertex_ready).as_secs_f64() * 1000.0,
+                (linked - fragment_ready).as_secs_f64() * 1000.0,
+                (ready - linked).as_secs_f64() * 1000.0,
+                (ready - started).as_secs_f64() * 1000.0,
+            );
+        }
 
         Ok(Self {
             context: context.clone(),
@@ -211,6 +274,10 @@ impl MainProgram {
             loc_glyphtex,
             loc_cliptex,
             loc_frag,
+            startup_trace,
+            shader_type: shader_type.to_u8(),
+            with_glyph_texture,
+            used: std::cell::Cell::new(false),
         })
     }
 
@@ -245,6 +312,12 @@ impl MainProgram {
     }
 
     pub(crate) fn bind(&self) {
+        if self.startup_trace && !self.used.replace(true) {
+            eprintln!(
+                "slint-poc-program-used {} {}",
+                self.shader_type, self.with_glyph_texture
+            );
+        }
         self.program.bind();
     }
 

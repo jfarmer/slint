@@ -101,12 +101,20 @@ impl super::WinitCompatibleRenderer for GlutinFemtoVGRenderer {
             .canvas()
             .ok_or_else(|| "FemtoVG Renderer: winit didn't return a canvas")?;
 
+        let renderer_started = std::time::Instant::now();
         self.renderer.set_opengl_context(
             #[cfg(not(target_arch = "wasm32"))]
             opengl_context,
             #[cfg(target_arch = "wasm32")]
             html_canvas.clone(),
         )?;
+
+        if std::env::var("SLINT_TRACE_RENDERER_STARTUP").as_deref() == Ok("1") {
+            eprintln!(
+                "slint-poc-stage femtovg_setup {:.6}",
+                renderer_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
 
         #[cfg(target_family = "wasm")]
         self.setup_webgl_context_loss_handlers(winit_window.id(), html_canvas);

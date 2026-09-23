@@ -63,6 +63,14 @@ impl OpenGLContext {
         active_event_loop: &winit::event_loop::ActiveEventLoop,
         requested_opengl_version: Option<RequestedOpenGLVersion>,
     ) -> Result<(Arc<winit::window::Window>, Self), PlatformError> {
+        let tracing = std::env::var("SLINT_TRACE_RENDERER_STARTUP").as_deref() == Ok("1");
+        let record = |name: &str, elapsed: std::time::Duration| {
+            if tracing {
+                eprintln!("slint-poc-stage {} {:.6}", name, elapsed.as_secs_f64() * 1000.0);
+            }
+        };
+        let started = std::time::Instant::now();
+        let config_ready = std::cell::Cell::new(started);
         let config_template_builder = glutin::config::ConfigTemplateBuilder::new();
 
         // On macOS, there's only one GL config and that's initialized based on the values in the config template
@@ -79,17 +87,20 @@ impl OpenGLContext {
             .with_preference(glutin_winit::ApiPreference::FallbackEgl)
             .with_window_attributes(Some(window_attributes.clone()));
         let config_picker = |it: Box<dyn Iterator<Item = glutin::config::Config> + '_>| {
-            it.reduce(|accum, config| {
-                let transparency_check = config.supports_transparency().unwrap_or(false)
-                    & !accum.supports_transparency().unwrap_or(false);
+            let config = it
+                .reduce(|accum, config| {
+                    let transparency_check = config.supports_transparency().unwrap_or(false)
+                        & !accum.supports_transparency().unwrap_or(false);
 
-                if transparency_check || config.num_samples() < accum.num_samples() {
-                    config
-                } else {
-                    accum
-                }
-            })
-            .expect("internal error: Could not find any matching GL configuration")
+                    if transparency_check || config.num_samples() < accum.num_samples() {
+                        config
+                    } else {
+                        accum
+                    }
+                })
+                .expect("internal error: Could not find any matching GL configuration");
+            config_ready.set(std::time::Instant::now());
+            config
         };
         let (window, gl_config) = display_builder
             .build(active_event_loop, config_template_builder, config_picker)
@@ -101,6 +112,10 @@ impl OpenGLContext {
                 )
             })?;
 
+        let window_ready = std::time::Instant::now();
+        record("display_and_config", config_ready.get() - started);
+        record("window_after_config", window_ready - config_ready.get());
+        let context_started = std::time::Instant::now();
         let gl_display = gl_config.display();
 
         let raw_window_handle = window
@@ -143,6 +158,8 @@ impl OpenGLContext {
                 .map_err(|glutin_err| format!("Cannot create OpenGL context: {glutin_err}"))?
         };
 
+        record("gl_context", context_started.elapsed());
+        let surface_started = std::time::Instant::now();
         let window = match window {
             Some(window) => window,
             None => glutin_winit::finalize_window(active_event_loop, window_attributes, &gl_config)
@@ -182,11 +199,16 @@ impl OpenGLContext {
             })?
         };
 
+        record("gl_surface", surface_started.elapsed());
+        let current_started = std::time::Instant::now();
         let context = not_current_gl_context.make_current(&surface)
             .map_err(|glutin_error: glutin::error::Error| -> PlatformError {
                 format!("FemtoVG Renderer: Failed to make newly created OpenGL context current: {glutin_error}")
             .into()
         })?;
+
+        record("gl_make_current", current_started.elapsed());
+        let configure_started = std::time::Instant::now();
 
         // Align the GL layer to the top-left, so that resizing only invalidates the bottom/right
         // part of the window.
@@ -225,6 +247,7 @@ impl OpenGLContext {
             )
             .ok();
 
+        record("gl_layer_and_vsync", configure_started.elapsed());
         let window = Arc::new(window);
 
         Ok((window.clone(), Self { context, surface, winit_window: window }))

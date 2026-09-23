@@ -1,3 +1,36 @@
+# Local Slint shader startup PoC
+
+Vendored from the `cargo package` output of femtovg master. Upstream revision
+is recorded in `.cargo_vcs_info.json`; the original manifest and licenses
+are retained. This is a temporary experiment, not a new maintained fork.
+
+Changes are limited to `src/renderer/opengl.rs` and
+`src/renderer/opengl/program.rs`:
+
+- `SLINT_TRACE_RENDERER_STARTUP=1` prints driver/program-binary capabilities,
+  per-program vertex compile, fragment compile, link, uniform-lookup and total
+  times in milliseconds, and first bindings. Binding is not a draw count.
+- `SLINT_LAZY_SHADERS=1` creates each program on its first access and reuses
+  it for the lifetime of the GL renderer. All variants remain available.
+  With the variable unset, construction remains eager.
+- First-access compilation failure panics in this PoC. The eager path retains
+  its original constructor error propagation. A production implementation
+  should surface the deferred error through the renderer error path.
+
+This is an in-process cache, not a persistent shader-binary cache. An unseen
+variant can still compile during a later interaction. Validate the actual UI
+before enabling this policy. There is no change to icon loading.
+
+The enclosing Slint winit backend also emits
+`slint-poc-stage <name> <milliseconds>` when tracing is enabled.
+`display_and_config` ends at the config-picker callback and
+`window_after_config` covers the rest of DisplayBuilder::build. On macOS
+this separates display/config discovery from native window creation; on WGL,
+window creation can precede configuration selection. `femtovg_setup` includes
+eager shader work, so do not add it to the per-program totals.
+
+---
+
 [![Crates.io](https://img.shields.io/crates/v/femtovg?color=4d76ae)](https://crates.io/crates/femtovg)
 [![API](https://docs.rs/femtovg/badge.svg)](https://docs.rs/femtovg)
 [![dependency status](https://deps.rs/repo/github/femtovg/femtovg/status.svg)](https://deps.rs/repo/github/femtovg/femtovg)
