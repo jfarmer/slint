@@ -21,7 +21,11 @@ pub struct FontCache {
 
 impl Default for FontCache {
     fn default() -> Self {
-        Self { font_mgr: skia_safe::FontMgr::new(), fonts: CLruCache::new(FONT_CACHE_CAPACITY) }
+        let font_mgr = {
+            let _span = i_slint_common::startup_trace::Span::new("skia_font_manager_create");
+            skia_safe::FontMgr::new()
+        };
+        Self { font_mgr, fonts: CLruCache::new(FONT_CACHE_CAPACITY) }
     }
 }
 
@@ -77,10 +81,14 @@ impl FontCache {
     }
 
     fn load_typeface_internal(&self, font: &parley::FontData) -> Option<skia_safe::Typeface> {
-        let typeface = self.font_mgr.new_from_data(
-            skia_safe::Data::new_copy(font.data.as_ref()),
-            if font.index > 0 { Some(font.index as _) } else { None },
-        );
+        let typeface = {
+            let _span = i_slint_common::startup_trace::Span::new("skia_font_from_data")
+                .with_amount(font.data.as_ref().len() as u64);
+            self.font_mgr.new_from_data(
+                skia_safe::Data::new_copy(font.data.as_ref()),
+                if font.index > 0 { Some(font.index as _) } else { None },
+            )
+        };
 
         // Due to  https://issues.skia.org/issues/310510989, fonts from true type collections
         // with an index > 0 fail to load on macOS. As a workaround, we manually extract the font from the
@@ -93,6 +101,8 @@ impl FontCache {
                 .and_then(|ttc| ttc.get(font.index).ok())
                 .map(|ttf| write_fonts::FontBuilder::new().copy_missing_tables(ttf).build())
                 .and_then(|new_ttf| {
+                    let _span = i_slint_common::startup_trace::Span::new("skia_font_from_ttc_data")
+                        .with_amount(new_ttf.len() as u64);
                     self.font_mgr.new_from_data(skia_safe::Data::new_copy(&new_ttf), None)
                 })
         {

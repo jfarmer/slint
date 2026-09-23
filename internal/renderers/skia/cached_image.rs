@@ -144,14 +144,14 @@ fn image_buffer_to_skia_image(buffer: &SharedImageBuffer) -> Option<skia_safe::I
             )
         }
         SharedImageBuffer::RGBA8(pixels) => (
-            skia_safe::Data::new_copy(pixels.as_bytes()),
+            copy_rgba_data(pixels.as_bytes()),
             pixels.width() as usize * 4,
             pixels.size(),
             skia_safe::ColorType::RGBA8888,
             opaque_or(pixels.as_bytes(), skia_safe::AlphaType::Unpremul),
         ),
         SharedImageBuffer::RGBA8Premultiplied(pixels) => (
-            skia_safe::Data::new_copy(pixels.as_bytes()),
+            copy_rgba_data(pixels.as_bytes()),
             pixels.width() as usize * 4,
             pixels.size(),
             skia_safe::ColorType::RGBA8888,
@@ -180,4 +180,13 @@ fn image_buffer_to_skia_image(buffer: &SharedImageBuffer) -> Option<skia_safe::I
         alpha_type,
     );
     skia_safe::images::raster_from_data(&image_info, data, bpl)
+}
+
+fn copy_rgba_data(bytes: &[u8]) -> skia_safe::Data {
+    if i_slint_common::startup_trace::enabled() {
+        i_slint_common::startup_trace::record("rgba_source_identity", bytes.as_ptr() as u64);
+    }
+    let _span =
+        i_slint_common::startup_trace::Span::new("skia_rgba_copy").with_amount(bytes.len() as u64);
+    skia_safe::Data::new_copy(bytes)
 }

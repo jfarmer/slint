@@ -603,6 +603,7 @@ impl SkiaRenderer {
         requested_graphics_api: Option<RequestedGraphicsAPI>,
         transparent: bool,
     ) -> Result<(), PlatformError> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.set_window_handle");
         // just in case
         self.suspend()?;
         let surface = (self.surface_factory)(
@@ -661,6 +662,7 @@ impl SkiaRenderer {
         surface_size: PhysicalWindowSize,
         post_render_cb: Option<&dyn Fn(&mut dyn ItemRenderer)>,
     ) -> Result<DrawOutcome, i_slint_core::platform::PlatformError> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.render");
         let surface = self.surface.borrow();
         let Some(surface) = surface.as_ref() else { return Ok(DrawOutcome::Success) };
         self.invoke_rendering_notifier_setup(surface.as_ref())?;
@@ -698,6 +700,8 @@ impl SkiaRenderer {
         window: &i_slint_core::api::Window,
         post_render_cb: Option<&dyn Fn(&mut dyn ItemRenderer)>,
     ) -> Option<DirtyRegion> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.render_to_canvas");
+        let prepare_span = i_slint_common::startup_trace::Span::new("skia.prepare_tree");
         skia_canvas.rotate(rotation_angle_degrees, None);
         skia_canvas.translate(translation);
 
@@ -705,6 +709,7 @@ impl SkiaRenderer {
 
         let dirty_region = window_inner
             .draw_contents(|components, post_render| {
+                drop(prepare_span);
                 self.render_components_to_canvas(
                     skia_canvas,
                     gr_context,
@@ -739,6 +744,9 @@ impl SkiaRenderer {
         components: &[(ItemTreeWeak, LogicalPoint)],
         post_render: &dyn Fn(&mut dyn ItemRenderer),
     ) -> Option<DirtyRegion> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.render_components");
+        let preparation_span =
+            i_slint_common::startup_trace::Span::new("skia.prepare_items_and_background");
         let window_inner = WindowInner::from_pub(window);
         let window_adapter = window_inner.window_adapter();
 
@@ -854,11 +862,14 @@ impl SkiaRenderer {
                 }
             }
 
+            drop(preparation_span);
             if let Some(callback) = self.rendering_notifier.borrow_mut().as_mut() {
                 // For the BeforeRendering rendering notifier callback it's important that this happens *after* clearing
                 // the back buffer, in order to allow the callback to provide its own rendering of the background.
                 // Skia's clear() will merely schedule a clear call, so flush right away to make it immediate.
                 if let Some(ctx) = gr_context.as_mut() {
+                    let _span =
+                        i_slint_common::startup_trace::Span::new("skia.notifier_background_flush");
                     ctx.flush(None);
                 }
 
@@ -869,6 +880,8 @@ impl SkiaRenderer {
                 }
             }
 
+            let items_span =
+                i_slint_common::startup_trace::Span::new("skia.render_component_items");
             for (component, origin) in components {
                 if let Some(component) = ItemTreeWeak::upgrade(component) {
                     i_slint_core::item_rendering::render_component_items(
@@ -880,6 +893,7 @@ impl SkiaRenderer {
                 }
             }
 
+            drop(items_span);
             post_render(item_renderer);
 
             if let Some(path) = dirty_region_to_visualize {
@@ -907,6 +921,7 @@ impl SkiaRenderer {
         }
 
         if let Some(ctx) = gr_context.as_mut() {
+            let _span = i_slint_common::startup_trace::Span::new("skia.final_flush");
             ctx.flush(None);
         }
 

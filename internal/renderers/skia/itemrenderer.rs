@@ -436,6 +436,7 @@ impl<'a> SkiaItemRenderer<'a> {
             // source size.
             return;
         }
+        let fit_vector_span = i_slint_common::startup_trace::Span::new("skia_image_fit_vector");
         let fits = if let i_slint_core::ImageInner::NineSlice(nine) =
             <&i_slint_core::ImageInner>::from(&source)
         {
@@ -458,6 +459,8 @@ impl<'a> SkiaItemRenderer<'a> {
                 tiling,
             )]
         };
+
+        drop(fit_vector_span.with_amount(fits.len() as u64));
 
         let _saved_canvas = self.pixel_align_origin_auto_restore();
         for fit in fits {
@@ -1230,10 +1233,13 @@ impl GlyphRenderer for SkiaItemRenderer<'_> {
             font.set_skew_x(-skew_degrees.to_radians().tan());
         }
 
+        let glyph_vector_span = i_slint_common::startup_trace::Span::new("skia_glyph_vectors");
         let (glyph_ids, glyph_positions): (Vec<_>, Vec<_>) = glyphs_it
             .into_iter()
             .map(|g| (g.id as skia_safe::GlyphId, skia_safe::Point::new(g.x, g.y + y_offset.get())))
             .unzip();
+
+        drop(glyph_vector_span.with_amount(glyph_ids.len() as u64));
 
         self.canvas.draw_glyphs_at(
             &glyph_ids,

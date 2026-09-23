@@ -18,6 +18,8 @@ pub mod key_codes;
 #[cfg(feature = "shared-fontique")]
 pub mod sharedfontique;
 
+pub mod startup_trace;
+
 pub mod styled_text;
 pub mod unicode_utils;
 

@@ -122,6 +122,7 @@ pub fn make_metal_context(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> Option<skia_safe::gpu::DirectContext> {
+    let import_span = i_slint_common::startup_trace::Span::new("skia.metal.import_device_queue");
     let backend = unsafe {
         let maybe_metal_device = device.as_hal::<wgpu::wgc::api::Metal>();
         let maybe_metal_queue = queue.as_hal::<wgpu::wgc::api::Metal>();
@@ -142,5 +143,7 @@ pub fn make_metal_context(
         })?
     };
 
+    drop(import_span);
+    let _span = i_slint_common::startup_trace::Span::new("skia.metal.make_context");
     skia_safe::gpu::direct_contexts::make_metal(&backend, None)
 }

@@ -75,6 +75,7 @@ impl WGPUSurface {
         surface: wgpu::Surface<'static>,
         size: PhysicalWindowSize,
     ) -> Result<Self, PlatformError> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.init_surface");
         let SharedWgpuState { adapter, device, queue, .. } = &*wgpu;
         #[cfg(target_vendor = "apple")]
         metal::set_layer_contents_gravity(&surface);
@@ -82,6 +83,7 @@ impl WGPUSurface {
         // On iOS a window has no size until UIKit attaches it to a scene,
         // and wgpu rejects a zero-sized configure.
         // Start at 1x1; `resize_event` applies the real size.
+        let capabilities_span = i_slint_common::startup_trace::Span::new("skia.wgpu.capabilities");
         let mut surface_config = surface
             .get_default_config(adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| PlatformError::from("WGPU surface is not compatible with adapter"))?;
@@ -103,17 +105,27 @@ impl WGPUSurface {
         // it is supported everywhere.
         surface_config.present_mode = wgpu::PresentMode::AutoVsync;
 
+        drop(capabilities_span);
+        let configure_span =
+            i_slint_common::startup_trace::Span::new("skia.wgpu.configure.initial");
         let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
         surface.configure(device, &surface_config);
+        drop(configure_span);
+        let scope_span =
+            i_slint_common::startup_trace::Span::new("skia.wgpu.configure.validation_scope");
         if let Some(e) = spin_on::spin_on(error_scope.pop()) {
             return Err(PlatformError::from(format!("Error configuring WGPU surface: {e}")));
         }
 
+        drop(scope_span);
         let backend = Backend::new(adapter, device)?;
 
-        let gr_context = backend
-            .make_context(adapter, device, queue)
-            .ok_or_else(|| PlatformError::from("Failed to create Skia context from WGPU"))?;
+        let gr_context = {
+            let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.create_skia_context");
+            backend
+                .make_context(adapter, device, queue)
+                .ok_or_else(|| PlatformError::from("Failed to create Skia context from WGPU"))?
+        };
 
         Ok(Self {
             gr_context: gr_context.into(),
@@ -278,6 +290,7 @@ impl crate::Surface for WGPUSurface {
         size: PhysicalWindowSize,
         requested_graphics_api: Option<RequestedGraphicsAPI>,
     ) -> Result<Self, PlatformError> {
+        let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.create_surface");
         let make_target = || -> Box<dyn wgpu::DisplayAndWindowHandle + 'static> {
             Box::new(WindowAndDisplayHandle(window_handle.clone(), display_handle.clone()))
         };
@@ -334,12 +347,14 @@ impl crate::Surface for WGPUSurface {
             }
         }
 
+        let device_span = i_slint_common::startup_trace::Span::new("skia.wgpu.initialize_graphics");
         let (instance, adapter, device, queue, surface) =
             i_slint_core::graphics::wgpu_30::init_instance_adapter_device_queue_surface(
                 make_target(),
                 requested_graphics_api,
                 i_slint_core::graphics::wgpu_30::default_backends_to_avoid(),
             )?;
+        drop(device_span);
         let wgpu = Rc::new(SharedWgpuState { instance, adapter, device, queue });
         let new_surface = Self::init_with_parts(wgpu.clone(), surface, size)?;
         if !manual_configuration {
@@ -362,10 +377,12 @@ impl crate::Surface for WGPUSurface {
         // Skip reconfigure if size hasn't changed — DRM/KMS surfaces don't
         // support being reconfigured.
         if surface_config.width == size.width && surface_config.height == size.height {
+            i_slint_common::startup_trace::record("skia.wgpu.resize.unchanged", 1);
             return Ok(());
         }
 
         {
+            let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.resize.sync_cpu");
             let gr_context = &mut self.gr_context.borrow_mut();
             // This is brute force, but for the lack of access to the fences this seems to work: Avoid any pending work so that
             // IDXGISwapChain::ResizeBuffers doesn't complain that the surface is still in use.
@@ -375,6 +392,8 @@ impl crate::Surface for WGPUSurface {
         surface_config.width = size.width;
         surface_config.height = size.height;
 
+        let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.configure.resize")
+            .with_amount(u64::from(size.width) * u64::from(size.height));
         surface.configure(&self.wgpu.device, surface_config);
         Ok(())
     }
@@ -390,6 +409,14 @@ impl crate::Surface for WGPUSurface {
         ) -> Option<DirtyRegion>,
         pre_present_callback: &RefCell<Option<Box<dyn FnMut()>>>,
     ) -> Result<DrawOutcome, PlatformError> {
+        static ATTEMPTS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let attempt = if i_slint_common::startup_trace::enabled() {
+            ATTEMPTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1
+        } else {
+            0
+        };
+        let _render_span = i_slint_common::startup_trace::Span::new("skia.wgpu.render_attempt")
+            .with_amount(attempt);
         let (Some(surface), Some(surface_config)) = (&self.surface, &*self.surface_config.borrow())
         else {
             return Err("WGPUSurface::render() called on offscreen surface".into());
@@ -397,11 +424,23 @@ impl crate::Surface for WGPUSurface {
 
         let gr_context = &mut self.gr_context.borrow_mut();
 
-        let frame = match surface.get_current_texture() {
+        let acquired = {
+            let _span =
+                i_slint_common::startup_trace::Span::new("skia.wgpu.acquire").with_amount(attempt);
+            surface.get_current_texture()
+        };
+        let frame = match acquired {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
-            wgpu::CurrentSurfaceTexture::Occluded => return Ok(DrawOutcome::Occluded),
-            wgpu::CurrentSurfaceTexture::Timeout => return Ok(DrawOutcome::Timeout),
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                i_slint_common::startup_trace::record("skia.wgpu.outcome.occluded", attempt);
+                return Ok(DrawOutcome::Occluded);
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                i_slint_common::startup_trace::record("skia.wgpu.outcome.timeout", attempt);
+                return Ok(DrawOutcome::Timeout);
+            }
             wgpu::CurrentSurfaceTexture::Validation => {
+                i_slint_common::startup_trace::record("skia.wgpu.outcome.validation", attempt);
                 return Err("WGPU surface validation error in get_current_texture".into());
             }
             stale @ (wgpu::CurrentSurfaceTexture::Outdated
@@ -413,10 +452,25 @@ impl crate::Surface for WGPUSurface {
                 // dropped before a new `Surface` is made"), panicking on the first frame on
                 // Wayland. Drop it first. (`Outdated`/`Lost` carry nothing → no-op.)
                 drop(stale);
-                surface.configure(&self.wgpu.device, surface_config);
-                match surface.get_current_texture() {
+                {
+                    let _span =
+                        i_slint_common::startup_trace::Span::new("skia.wgpu.configure.stale");
+                    surface.configure(&self.wgpu.device, surface_config);
+                }
+                let reacquired = {
+                    let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.reacquire")
+                        .with_amount(attempt);
+                    surface.get_current_texture()
+                };
+                match reacquired {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
-                    _ => return Ok(DrawOutcome::Occluded),
+                    _ => {
+                        i_slint_common::startup_trace::record(
+                            "skia.wgpu.outcome.reacquire_failed",
+                            attempt,
+                        );
+                        return Ok(DrawOutcome::Occluded);
+                    }
                 }
             }
         };
@@ -425,6 +479,8 @@ impl crate::Surface for WGPUSurface {
         // tracking, so `Queue::present` would treat the frame as never written
         // and clear it. Clear it through wgpu instead before Skia draws; the
         // in-order queue keeps Skia's later-committed work on top.
+        let init_span =
+            i_slint_common::startup_trace::Span::new("skia.wgpu.frame_init").with_amount(attempt);
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder =
             self.wgpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -447,23 +503,38 @@ impl crate::Surface for WGPUSurface {
             multiview_mask: None,
         });
         self.wgpu.queue.submit(Some(encoder.finish()));
+        drop(init_span);
 
-        let skia_surface = self.backend.make_swapchain_surface(gr_context, &frame.texture);
+        let skia_surface = {
+            let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.wrap_swapchain")
+                .with_amount(attempt);
+            self.backend.make_swapchain_surface(gr_context, &frame.texture)
+        };
 
         let mut skia_surface = skia_surface
             .ok_or_else(|| PlatformError::from("Failed to create Skia surface from WGPU"))?;
 
-        callback(skia_surface.canvas(), Some(gr_context), 0);
+        {
+            let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.render_callback")
+                .with_amount(attempt);
+            callback(skia_surface.canvas(), Some(gr_context), 0);
+        }
 
         self.backend.release_swapchain_surface(gr_context, &mut skia_surface);
 
-        self.flush_and_submit(gr_context);
+        {
+            let _span =
+                i_slint_common::startup_trace::Span::new("skia.wgpu.submit").with_amount(attempt);
+            self.flush_and_submit(gr_context);
+        }
 
         // Skia drew via the raw queue behind wgpu's back, and `Queue::present` skips its own
         // transition when the tracker already says PRESENT, so nothing would order the
         // presentation after Skia's work: the clear submission above signals its semaphore
         // before Skia even starts. Referencing the frame texture in a submission of our own
         // makes present wait for it.
+        let ordering_span = i_slint_common::startup_trace::Span::new("skia.wgpu.present_ordering")
+            .with_amount(attempt);
         let mut encoder =
             self.wgpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Skia present ordering encoder"),
@@ -477,12 +548,18 @@ impl crate::Surface for WGPUSurface {
             }),
         );
         self.wgpu.queue.submit(Some(encoder.finish()));
+        drop(ordering_span);
 
         if let Some(pre_present_callback) = pre_present_callback.borrow_mut().as_mut() {
             pre_present_callback();
         }
 
-        self.wgpu.queue.present(frame);
+        {
+            let _span =
+                i_slint_common::startup_trace::Span::new("skia.wgpu.present").with_amount(attempt);
+            self.wgpu.queue.present(frame);
+        }
+        i_slint_common::startup_trace::record("skia.wgpu.outcome.success", attempt);
 
         Ok(DrawOutcome::Success)
     }
@@ -552,6 +629,8 @@ impl crate::Surface for WGPUSurface {
         };
         if surface_config.alpha_mode != mode {
             surface_config.alpha_mode = mode;
+            let _span = i_slint_common::startup_trace::Span::new("skia.wgpu.configure.alpha")
+                .with_amount(u64::from(transparent));
             surface.configure(&self.wgpu.device, surface_config);
         }
         Ok(())

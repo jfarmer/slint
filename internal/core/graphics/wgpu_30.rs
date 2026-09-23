@@ -339,6 +339,7 @@ pub async fn async_init_instance_adapter_device_queue_surface(
     let surface_target = surface_target.into();
 
     let create_surface = |instance: &wgpu::Instance| {
+        let _span = i_slint_common::startup_trace::Span::new("wgpu.create_surface");
         match surface_target {
             SurfaceTarget::WindowHandle(window_handle) => instance.create_surface(window_handle),
             // Safety: The caller ensures the DRM file descriptor in the surface target
@@ -368,6 +369,7 @@ pub async fn async_init_instance_adapter_device_queue_surface(
         }
         #[cfg(feature = "unstable-wgpu-30")]
         Some(RequestedGraphicsAPI::WGPU30(api::WGPUConfiguration::Automatic(wgpu30_settings))) => {
+            let instance_span = i_slint_common::startup_trace::Span::new("wgpu.instance");
             let instance =
                 wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
                     backends: mask_backends(wgpu30_settings.backends, backends_to_avoid),
@@ -377,6 +379,7 @@ pub async fn async_init_instance_adapter_device_queue_surface(
                     display: None,
                 })
                 .await;
+            drop(instance_span);
 
             let surface = create_surface(&instance)?;
 
@@ -432,6 +435,7 @@ pub async fn async_init_instance_adapter_device_queue_surface(
                 .into());
             }
 
+            let instance_span = i_slint_common::startup_trace::Span::new("wgpu.instance");
             let instance =
                 wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
                     backends,
@@ -441,9 +445,11 @@ pub async fn async_init_instance_adapter_device_queue_surface(
                     display: None,
                 })
                 .await;
+            drop(instance_span);
 
             let surface = create_surface(&instance)?;
 
+            let adapter_span = i_slint_common::startup_trace::Span::new("wgpu.adapter");
             let adapter =
                 wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface))
                     .await
@@ -451,12 +457,15 @@ pub async fn async_init_instance_adapter_device_queue_surface(
                         alloc::format!("Failed to find an appropriate adapter: {e}").into()
                     })?;
 
+            drop(adapter_span);
+            let device_span = i_slint_common::startup_trace::Span::new("wgpu.device");
             let (device, queue) = adapter
                 .request_device(&default_device_descriptor(&adapter))
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> {
                     alloc::format!("Failed to create device: {e}").into()
                 })?;
+            drop(device_span);
             (instance, adapter, device, queue, surface)
         }
         Some(other) => {

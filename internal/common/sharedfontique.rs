@@ -20,6 +20,7 @@ use std::sync::Arc;
 /// This uses the bundled Inter fallback; applications can supply additional fonts through imports, registration, or explicit font paths.
 /// Other values preserve system font discovery.
 pub fn create_collection(shared: bool) -> Collection {
+    let _collection_span = crate::startup_trace::Span::new("fontique.create_collection");
     init_collection(system_collection(shared), shared)
 }
 
@@ -32,8 +33,10 @@ fn system_fonts_requested() -> bool {
 /// Pass the result to [`init_collection`].
 pub fn system_collection(shared: bool) -> fontique::Collection {
     let system_fonts = system_fonts_requested() && !cfg!(miri);
-    let create =
-        || fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts });
+    let create = || {
+        let _span = crate::startup_trace::Span::new("fontique.collection_new");
+        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts })
+    };
     // Fontique's Foundation calls autorelease their results,
     // and the calling thread may have no autorelease pool in place.
     #[cfg(target_vendor = "apple")]
@@ -46,8 +49,10 @@ pub fn system_collection(shared: bool) -> fontique::Collection {
 /// They become the default font and the generic families.
 pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Collection {
     let system_fonts = system_fonts_requested();
-    let mut source_cache =
-        if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() };
+    let mut source_cache = {
+        let _span = crate::startup_trace::Span::new("fontique.source_cache_new");
+        if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() }
+    };
 
     // Preserves insertion order — the primary (SLINT_DEFAULT_FONT) lands first, fallbacks
     // (SLINT_FONT_PATH) follow. The runtime bitmap-font fallback and the compile-time
@@ -57,22 +62,34 @@ pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Co
 
     if !system_fonts || cfg!(any(target_family = "wasm", target_os = "nto")) {
         let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
-        let fonts = collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
-        for script in fontique::Script::all_samples().iter().map(|(script, _)| *script) {
-            collection.append_fallbacks(
-                fontique::FallbackKey::new(script, None),
-                fonts.iter().map(|(family_id, _)| *family_id),
-            );
+        let fonts = {
+            let _span = crate::startup_trace::Span::new("fontique.register_bundled_font")
+                .with_amount(data.len() as u64);
+            collection.register_fonts(fontique::Blob::new(Arc::new(data)), None)
+        };
+        {
+            let _span = crate::startup_trace::Span::new("fontique.append_script_fallbacks")
+                .with_amount(fontique::Script::all_samples().len() as u64);
+            for script in fontique::Script::all_samples().iter().map(|(script, _)| *script) {
+                collection.append_fallbacks(
+                    fontique::FallbackKey::new(script, None),
+                    fonts.iter().map(|(family_id, _)| *family_id),
+                );
+            }
         }
-        for generic_family in [
-            fontique::GenericFamily::SansSerif,
-            fontique::GenericFamily::SystemUi,
-            fontique::GenericFamily::UiSansSerif,
-        ] {
-            collection.append_generic_families(
-                generic_family,
-                fonts.iter().map(|(family_id, _)| *family_id),
-            );
+        {
+            let _span =
+                crate::startup_trace::Span::new("fontique.append_generic_families").with_amount(3);
+            for generic_family in [
+                fontique::GenericFamily::SansSerif,
+                fontique::GenericFamily::SystemUi,
+                fontique::GenericFamily::UiSansSerif,
+            ] {
+                collection.append_generic_families(
+                    generic_family,
+                    fonts.iter().map(|(family_id, _)| *family_id),
+                );
+            }
         }
     }
 

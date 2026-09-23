@@ -520,8 +520,10 @@ impl SharedBackendData {
             builder.with_any_thread(true);
         }
 
-        let event_loop =
-            builder.build().map_err(|e| format!("Error initializing winit event loop: {e}"))?;
+        let event_loop = {
+            let _span = i_slint_common::startup_trace::Span::new("winit.event_loop_build");
+            builder.build().map_err(|e| format!("Error initializing winit event loop: {e}"))?
+        };
 
         #[cfg(target_os = "macos")]
         Self::disable_macos_automatic_shortcut_localization();
@@ -548,11 +550,13 @@ impl SharedBackendData {
 
         let event_loop_proxy = event_loop.create_proxy();
         #[cfg(not(target_arch = "wasm32"))]
-        let clipboard = crate::clipboard::create_clipboard(
-            &event_loop
+        let clipboard = {
+            let display_handle = event_loop
                 .display_handle()
-                .map_err(|display_err| PlatformError::OtherError(display_err.into()))?,
-        );
+                .map_err(|display_err| PlatformError::OtherError(display_err.into()))?;
+            let _span = i_slint_common::startup_trace::Span::new("winit.clipboard_create");
+            crate::clipboard::create_clipboard(&display_handle)
+        };
         Ok(Self {
             context: Default::default(),
             allow_fallback,

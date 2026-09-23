@@ -147,6 +147,7 @@ pub(super) fn layout(
 
     // Returned None if failed to get the ellipsis glyph for some rare reason.
     let get_ellipsis_glyph = |font_context: &mut FontContext| {
+        let _span = i_slint_common::startup_trace::Span::new("text_ellipsis_shape");
         let mut layout = layout_builder.build(font_context, "…", None, None);
         layout.break_all_lines(None);
         let line = layout.lines().next()?;
@@ -587,6 +588,9 @@ impl Layout {
             None
         };
 
+        if ellipsis.is_some() {
+            i_slint_common::startup_trace::record("text_ellipsis_emitted", 1);
+        }
         (truncated_glyphs, ellipsis)
     }
 }
