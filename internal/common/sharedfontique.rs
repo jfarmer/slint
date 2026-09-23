@@ -7,7 +7,6 @@ pub use skrifa;
 #[cfg(feature = "svg-text")]
 pub mod svg;
 
-#[cfg(any(target_family = "wasm", target_os = "nto"))]
 use fontique::ScriptExt;
 
 use std::collections::HashSet;
@@ -16,16 +15,25 @@ use std::sync::Arc;
 /// Create a new fontique Collection.
 /// When `shared` is true, the collection uses `Arc`-based internal sharing,
 /// so that clones share the underlying data and mutations are visible across clones.
+///
+/// Set `SLINT_NO_SYSTEM_FONTS=1` before creating the collection to skip system font discovery.
+/// This uses the bundled Inter fallback; applications can supply additional fonts through imports, registration, or explicit font paths.
+/// Other values preserve system font discovery.
 pub fn create_collection(shared: bool) -> Collection {
     init_collection(system_collection(shared), shared)
+}
+
+/// Whether `SLINT_NO_SYSTEM_FONTS=1` is unset, so that collections discover the system fonts.
+fn system_fonts_requested() -> bool {
+    std::env::var("SLINT_NO_SYSTEM_FONTS").as_deref() != Ok("1")
 }
 
 /// Discovers the system fonts, without the fonts from `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH`.
 /// Pass the result to [`init_collection`].
 pub fn system_collection(shared: bool) -> fontique::Collection {
-    let create = || {
-        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts: !cfg!(miri) })
-    };
+    let system_fonts = system_fonts_requested() && !cfg!(miri);
+    let create =
+        || fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts });
     // Fontique's Foundation calls autorelease their results,
     // and the calling thread may have no autorelease pool in place.
     #[cfg(target_vendor = "apple")]
@@ -37,6 +45,7 @@ pub fn system_collection(shared: bool) -> fontique::Collection {
 /// Adds the fonts from `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH` to a collection from [`system_collection`].
 /// They become the default font and the generic families.
 pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Collection {
+    let system_fonts = system_fonts_requested();
     let mut source_cache =
         if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() };
 
@@ -46,8 +55,7 @@ pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Co
     let mut default_fonts: Vec<(std::path::PathBuf, fontique::QueryFont)> = Vec::new();
     let mut chain_families: Vec<fontique::FamilyId> = Vec::new();
 
-    #[cfg(any(target_family = "wasm", target_os = "nto"))]
-    {
+    if !system_fonts || cfg!(any(target_family = "wasm", target_os = "nto")) {
         let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
         let fonts = collection.register_fonts(fontique::Blob::new(Arc::new(data)), None);
         for script in fontique::Script::all_samples().iter().map(|(script, _)| *script) {
