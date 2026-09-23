@@ -23,9 +23,34 @@ impl Default for FontCache {
     fn default() -> Self {
         let font_mgr = {
             let _span = i_slint_common::startup_trace::Span::new("skia_font_manager_create");
+            #[cfg(target_os = "macos")]
+            {
+                if std::env::var("SLINT_SKIA_SYSTEM_FONT_MANAGER").as_deref() == Ok("1") {
+                    i_slint_common::startup_trace::record("skia_font_manager_system", 1);
+                    skia_safe::FontMgr::new()
+                } else {
+                    match skia_safe::FontMgr::core_text_without_catalogue() {
+                        Some(manager) => {
+                            i_slint_common::startup_trace::record(
+                                "skia_font_manager_no_catalogue",
+                                1,
+                            );
+                            manager
+                        }
+                        None => {
+                            i_slint_common::startup_trace::record("skia_font_manager_fallback", 1);
+                            skia_safe::FontMgr::new()
+                        }
+                    }
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             skia_safe::FontMgr::new()
         };
-        Self { font_mgr, fonts: CLruCache::new(FONT_CACHE_CAPACITY) }
+        Self {
+            font_mgr,
+            fonts: CLruCache::new(FONT_CACHE_CAPACITY),
+        }
     }
 }
 
@@ -69,8 +94,9 @@ impl FontCache {
                             }
                         })
                         .collect();
-                let position =
-                    skia_safe::font_arguments::VariationPosition { coordinates: &coords };
+                let position = skia_safe::font_arguments::VariationPosition {
+                    coordinates: &coords,
+                };
                 let args = skia_safe::FontArguments::new().set_variation_design_position(position);
                 base.clone_with_arguments(&args).or(Some(base))
             });
@@ -86,7 +112,11 @@ impl FontCache {
                 .with_amount(font.data.as_ref().len() as u64);
             self.font_mgr.new_from_data(
                 skia_safe::Data::new_copy(font.data.as_ref()),
-                if font.index > 0 { Some(font.index as _) } else { None },
+                if font.index > 0 {
+                    Some(font.index as _)
+                } else {
+                    None
+                },
             )
         };
 
@@ -99,11 +129,16 @@ impl FontCache {
             && let Some(typeface) = read_fonts::CollectionRef::new(font.data.as_ref())
                 .ok()
                 .and_then(|ttc| ttc.get(font.index).ok())
-                .map(|ttf| write_fonts::FontBuilder::new().copy_missing_tables(ttf).build())
+                .map(|ttf| {
+                    write_fonts::FontBuilder::new()
+                        .copy_missing_tables(ttf)
+                        .build()
+                })
                 .and_then(|new_ttf| {
                     let _span = i_slint_common::startup_trace::Span::new("skia_font_from_ttc_data")
                         .with_amount(new_ttf.len() as u64);
-                    self.font_mgr.new_from_data(skia_safe::Data::new_copy(&new_ttf), None)
+                    self.font_mgr
+                        .new_from_data(skia_safe::Data::new_copy(&new_ttf), None)
                 })
         {
             return Some(typeface);
