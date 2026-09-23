@@ -34,11 +34,28 @@ mod implementation {
         name: &'static str,
         start: Option<Instant>,
         amount: u64,
+        #[cfg(target_os = "macos")]
+        cpu: Option<(&'static str, u64)>,
     }
 
     impl Span {
         pub fn new(name: &'static str) -> Self {
-            Self { name, start: enabled().then(Instant::now), amount: 1 }
+            Self {
+                name,
+                start: enabled().then(Instant::now),
+                amount: 1,
+                #[cfg(target_os = "macos")]
+                cpu: None,
+            }
+        }
+
+        #[allow(unused_mut, unused_variables)]
+        pub fn with_thread_cpu(mut self, name: &'static str) -> Self {
+            #[cfg(target_os = "macos")]
+            if self.start.is_some() {
+                self.cpu = thread_cpu_ns().map(|start| (name, start));
+            }
+            self
         }
 
         pub fn with_amount(mut self, amount: u64) -> Self {
@@ -47,10 +64,31 @@ mod implementation {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)]
+    fn thread_cpu_ns() -> Option<u64> {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // CLOCK_THREAD_CPUTIME_ID includes the calling thread's user and kernel CPU time.
+        // SAFETY: clock_gettime only writes the clock's value into `time`.
+        let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
+        (result == 0).then_some(time.tv_sec as u64 * 1_000_000_000 + time.tv_nsec as u64)
+    }
+
     impl Drop for Span {
         fn drop(&mut self) {
             if let Some(start) = self.start {
                 let duration_ns = start.elapsed().as_nanos() as u64;
+                #[cfg(target_os = "macos")]
+                if let Some((name, cpu_start)) = self.cpu {
+                    if let Some(cpu_end) = thread_cpu_ns() {
+                        record_interval(
+                            name,
+                            start,
+                            std::time::Duration::ZERO,
+                            cpu_end.saturating_sub(cpu_start),
+                        );
+                    }
+                }
                 let start_ns = start.duration_since(origin().unwrap()).as_nanos() as u64;
                 SAMPLES.with_borrow_mut(|samples| {
                     samples.push(Sample {
@@ -118,6 +156,9 @@ mod implementation {
     impl Span {
         pub fn new(_: &'static str) -> Self {
             Self
+        }
+        pub fn with_thread_cpu(self, _: &'static str) -> Self {
+            self
         }
         pub fn with_amount(self, _: u64) -> Self {
             self

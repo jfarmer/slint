@@ -921,7 +921,8 @@ impl SkiaRenderer {
         }
 
         if let Some(ctx) = gr_context.as_mut() {
-            let _span = i_slint_common::startup_trace::Span::new("skia.final_flush");
+            let _span = i_slint_common::startup_trace::Span::new("skia.final_flush")
+                .with_thread_cpu("skia.final_flush.thread_cpu_ns");
             ctx.flush(None);
         }
 

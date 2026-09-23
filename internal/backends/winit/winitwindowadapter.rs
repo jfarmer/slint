@@ -668,6 +668,7 @@ impl WinitWindowAdapter {
         let winit_window =
             self.renderer.resume(active_event_loop, window_attributes, self.self_weak.clone())?;
         self.first_frame_presented.set(false);
+        let theme_span = i_slint_common::startup_trace::Span::new("winit.initial_theme");
 
         // Push the host shell's color scheme and accent color to the SlintContext.
         // With `xdg_desktop_settings` the backend-wide portal watcher (spawned in
@@ -697,6 +698,8 @@ impl WinitWindowAdapter {
             }
         }
 
+        drop(theme_span);
+        let scale_span = i_slint_common::startup_trace::Span::new("winit.initial_scale_factor");
         let scale_factor =
             overriding_scale_factor.unwrap_or_else(|| winit_window.scale_factor() as f32);
         self.window()
@@ -720,12 +723,17 @@ impl WinitWindowAdapter {
             ));
         }
 
+        drop(scale_span);
+        let throttle_span = i_slint_common::startup_trace::Span::new("winit.create_frame_throttle");
         let frame_throttle = crate::frame_throttle::create_frame_throttle(
             self.self_weak.clone(),
             &winit_window,
             self.shared_backend_data.is_wayland,
         );
 
+        drop(throttle_span);
+        let adapters_span =
+            i_slint_common::startup_trace::Span::new("winit.install_window_adapters");
         *self.winit_window_or_none.borrow_mut() = WinitWindowOrNone::HasWindow {
             window: winit_window.clone(),
             frame_throttle,
@@ -768,6 +776,8 @@ impl WinitWindowAdapter {
             ),
         };
 
+        drop(adapters_span);
+        let menus_span = i_slint_common::startup_trace::Span::new("winit.initial_menus");
         #[cfg(muda)]
         {
             let menubar = self.menubar();
@@ -790,7 +800,9 @@ impl WinitWindowAdapter {
             }
         }
 
+        drop(menus_span);
         if show_after_creation {
+            let _span = i_slint_common::startup_trace::Span::new("winit.initial_set_visibility");
             self.shown.set(WindowVisibility::Hidden);
             self.set_visibility(WindowVisibility::ShownFirstTime)?;
         }
@@ -1706,12 +1718,17 @@ impl WinitWindowAdapter {
                 return Ok(());
             };
 
+            let _visibility_span =
+                i_slint_common::startup_trace::Span::new("winit.show_existing_window");
+            let preferred_span =
+                i_slint_common::startup_trace::Span::new("winit.show_preferred_size");
             let runtime_window = WindowInner::from_pub(self.window());
 
             let scale_factor = runtime_window.scale_factor() as f64;
 
             #[allow(unused_mut)]
             let mut preferred_size = self.preferred_size().unwrap_or_default();
+            drop(preferred_span);
 
             #[cfg(target_arch = "wasm32")]
             if let Some(html_canvas) = winit_window.canvas() {
@@ -1739,6 +1756,7 @@ impl WinitWindowAdapter {
             {
                 // use the Slint's window Scale factor to take in account the override
                 let size = preferred_size.to_physical::<u32>(scale_factor);
+                let _span = i_slint_common::startup_trace::Span::new("winit.show_resize");
                 self.resize_window(size.into())?;
             };
 
