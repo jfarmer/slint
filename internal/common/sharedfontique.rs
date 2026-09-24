@@ -17,8 +17,10 @@ use std::sync::Arc;
 /// When `shared` is true, the collection uses `Arc`-based internal sharing,
 /// so that clones share the underlying data and mutations are visible across clones.
 pub fn create_collection(shared: bool) -> Collection {
-    let mut collection =
-        fontique::Collection::new(fontique::CollectionOptions { shared, system_fonts: true });
+    let mut collection = fontique::Collection::new(fontique::CollectionOptions {
+        shared,
+        system_fonts: std::env::var("SLINT_NO_SYSTEM_FONTS").as_deref() != Ok("1"),
+    });
     let mut source_cache =
         if shared { fontique::SourceCache::new_shared() } else { fontique::SourceCache::default() };
 
@@ -243,5 +245,96 @@ mod tests {
             font.axes().iter().all(|axis| axis.tag() != "opsz"),
             "the embedded font still has an optical-size axis; pin it"
         );
+    }
+
+    #[test]
+    #[cfg(not(any(target_family = "wasm", target_os = "nto")))]
+    fn system_font_discovery() {
+        use super::{create_collection, fontique};
+        use std::process::Command;
+
+        let font_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("sharedfontique/Inter-VariableFont.ttf");
+
+        let Ok(case) = std::env::var("SLINT_TEST_FONT_COLLECTION") else {
+            for (value, case) in [
+                (None, "system"),
+                (Some(""), "system"),
+                (Some("0"), "system"),
+                (Some("true"), "system"),
+                (Some(" 1"), "system"),
+                (Some("1"), "empty"),
+                (Some("1"), "default"),
+                (Some("1"), "path"),
+                (Some("1"), "directory"),
+            ] {
+                let mut command = Command::new(std::env::current_exe().unwrap());
+                command
+                    .args(["--exact", "sharedfontique::tests::system_font_discovery"])
+                    .env("SLINT_TEST_FONT_COLLECTION", case)
+                    .env_remove("SLINT_NO_SYSTEM_FONTS")
+                    .env_remove("SLINT_DEFAULT_FONT")
+                    .env_remove("SLINT_FONT_PATH");
+                if let Some(value) = value {
+                    command.env("SLINT_NO_SYSTEM_FONTS", value);
+                }
+                match case {
+                    "default" => {
+                        command.env("SLINT_DEFAULT_FONT", &font_path);
+                    }
+                    "path" => {
+                        command.env("SLINT_FONT_PATH", &font_path);
+                    }
+                    "directory" => {
+                        command.env("SLINT_FONT_PATH", font_path.parent().unwrap());
+                    }
+                    _ => {}
+                }
+                assert!(command.status().unwrap().success(), "{value:?}, {case}");
+            }
+            return;
+        };
+
+        let data = include_bytes!("sharedfontique/Inter-VariableFont.ttf");
+        for shared in [false, true] {
+            let mut collection = create_collection(shared);
+            let mut names: Vec<_> = collection.family_names().map(str::to_owned).collect();
+            names.sort();
+            match case.as_str() {
+                "system" => {
+                    let mut system = fontique::Collection::new(fontique::CollectionOptions {
+                        shared,
+                        ..Default::default()
+                    });
+                    let mut expected: Vec<_> = system.family_names().map(str::to_owned).collect();
+                    expected.sort();
+                    assert_eq!(names, expected);
+                }
+                "empty" => assert!(names.is_empty()),
+                "default" | "path" | "directory" => {
+                    assert_eq!(names, ["Inter"]);
+                    assert_eq!(collection.default_fonts.len(), 1);
+                    assert_eq!(collection.default_fonts[0].0, font_path);
+                    let mut query = collection.query();
+                    query.set_families([fontique::QueryFamily::Generic(
+                        fontique::GenericFamily::SansSerif,
+                    )]);
+                    let mut matched = false;
+                    query.matches_with(|font| {
+                        assert_eq!(font.blob.data(), data.as_slice());
+                        matched = true;
+                        fontique::QueryStatus::Stop
+                    });
+                    assert!(matched);
+                }
+                _ => panic!("unknown test case: {case}"),
+            }
+
+            let registered = collection.register_fonts(data.to_vec().into(), None);
+            let (family, infos) = registered.first().unwrap();
+            assert_eq!(collection.family_name(*family), Some("Inter"));
+            let font = collection.get_font_for_info(*family, &infos[0]).unwrap();
+            assert_eq!(font.blob.data(), data.as_slice());
+        }
     }
 }

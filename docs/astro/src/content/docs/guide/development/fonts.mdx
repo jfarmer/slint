@@ -32,6 +32,32 @@ export component Example inherits Window {
 }
 ```
 
+## Disabling System Font Discovery
+
+Set `SLINT_NO_SYSTEM_FONTS=1` to skip automatic system-font discovery in Slint's shared Fontique collection.
+Use this when your application supplies its fonts and doesn't need the system's installed fonts.
+Only the exact value `1` disables discovery.
+An unset variable, an empty value, or any other value keeps the default behavior.
+
+The setting is read when each font collection is created.
+Set it before initializing Slint, including registering fonts through Slint's runtime APIs.
+It also applies during compilation when embedding glyphs or rasterizing SVG text.
+Set it in the build environment as well as the application's environment to disable discovery in both.
+Cargo tracks changes through `slint-build` and `slint!`; with other build systems, rebuild the generated code after changing the variable.
+
+Imported fonts and fonts registered at runtime remain available.
+`SLINT_DEFAULT_FONT` still selects a font file as the primary font.
+`SLINT_FONT_PATH` still loads additional font files or directories into the fallback chain.
+Separate its entries with the platform's path separator (`:` on Unix, `;` on Windows); directories are scanned non-recursively.
+Supply fonts covering all text your application displays, including fallback glyphs, and select an available `default-font-family` or `SLINT_DEFAULT_FONT`.
+
+This controls Fontique discovery for Slint text in the Skia, FemtoVG, Qt, software (with `std`), and experimental AnyRender renderers.
+It applies on platforms where Fontique discovers system fonts: Windows, macOS, iOS, Linux, FreeBSD, and Android.
+It doesn't disable native font lookups by Qt widgets, platform integrations, or Skia's native font manager.
+It also leaves system-library build dependencies, such as Fontconfig, in place.
+On WebAssembly and QNX, the existing bundled fallback font remains available.
+Bare-metal runtimes without system-font support are unaffected; their build host can still use this setting when embedding fonts.
+
 ## Fonts on embedded and bare-metal targets
 
 The fonts used for rendering are automatically picked up from the operating system running
@@ -59,5 +85,5 @@ of pre-rendered bitmaps, trading some rendering quality for a smaller footprint.
 feature), or by setting `SLINT_EMBED_RESOURCES` to `embed-for-software-renderer-with-sdf` (C++,
 requires the `SLINT_FEATURE_SDF_FONTS` feature).
 
-On targets that do have an operating system, enable the `software-renderer-systemfonts` cargo
-feature to let the software renderer also use fonts installed on the system.
+With the `std` and `renderer-software` Cargo features enabled, the software renderer can use fonts installed on the system.
+Set `SLINT_NO_SYSTEM_FONTS=1` to disable their automatic discovery as described above.

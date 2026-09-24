@@ -546,6 +546,7 @@ pub fn compile_with_config(
 
     println!("cargo:rerun-if-env-changed=SLINT_STYLE");
     println!("cargo:rerun-if-env-changed=SLINT_FONT_SIZES");
+    println!("cargo:rerun-if-env-changed=SLINT_NO_SYSTEM_FONTS");
     println!("cargo:rerun-if-env-changed=SLINT_SCALE_FACTOR");
     println!("cargo:rerun-if-env-changed=SLINT_ASSET_SECTION");
     println!("cargo:rerun-if-env-changed=SLINT_EMBED_RESOURCES");

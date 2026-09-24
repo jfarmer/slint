@@ -474,6 +474,7 @@ pub fn slint(stream: TokenStream) -> TokenStream {
 
     result.extend(reload);
     result.extend(quote! {const _ : ::core::option::Option<&'static str> = ::core::option_env!("SLINT_STYLE");});
+    result.extend(quote! {const _ : ::core::option::Option<&'static str> = ::core::option_env!("SLINT_NO_SYSTEM_FONTS");});
 
     let mut result = TokenStream::from(result);
     if !diag.is_empty() {
