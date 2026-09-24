@@ -3,8 +3,7 @@
 
 #[cfg(feature = "shared-fontique")]
 mod implementation {
-    use std::cell::RefCell;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Instant;
 
     static ORIGIN: OnceLock<Option<Instant>> = OnceLock::new();
@@ -16,8 +15,10 @@ mod implementation {
         amount: u64,
     }
 
-    std::thread_local! {
-        static SAMPLES: RefCell<Vec<Sample>> = const { RefCell::new(Vec::new()) };
+    static SAMPLES: Mutex<Vec<Sample>> = Mutex::new(Vec::new());
+
+    fn with_samples(f: impl FnOnce(&mut Vec<Sample>)) {
+        f(&mut SAMPLES.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
     }
 
     fn origin() -> Option<Instant> {
@@ -90,7 +91,7 @@ mod implementation {
                     }
                 }
                 let start_ns = start.duration_since(origin().unwrap()).as_nanos() as u64;
-                SAMPLES.with_borrow_mut(|samples| {
+                with_samples(|samples| {
                     samples.push(Sample {
                         name: self.name,
                         start_ns,
@@ -109,7 +110,7 @@ mod implementation {
         amount: u64,
     ) {
         if let Some(origin) = origin() {
-            SAMPLES.with_borrow_mut(|samples| {
+            with_samples(|samples| {
                 samples.push(Sample {
                     name,
                     start_ns: start.saturating_duration_since(origin).as_nanos() as u64,
@@ -123,20 +124,18 @@ mod implementation {
     pub fn record(name: &'static str, amount: u64) {
         if let Some(origin) = origin() {
             let start_ns = origin.elapsed().as_nanos() as u64;
-            SAMPLES.with_borrow_mut(|samples| {
-                samples.push(Sample { name, start_ns, duration_ns: 0, amount })
-            });
+            with_samples(|samples| samples.push(Sample { name, start_ns, duration_ns: 0, amount }));
         }
     }
 
-    // Call on the instrumented UI thread after the responsiveness probe completes.
+    // Call after the responsiveness probe completes; drains samples recorded on every thread.
     // Buffered spans include nested wall times and must not be summed indiscriminately.
     pub fn flush() {
         if !enabled() {
             return;
         }
         use std::io::Write;
-        SAMPLES.with_borrow_mut(|samples| {
+        with_samples(|samples| {
             let stderr = std::io::stderr();
             let mut output = std::io::BufWriter::new(stderr.lock());
             for sample in samples.drain(..) {
