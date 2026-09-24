@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
-use objc2_app_kit::{NSView, NSWindow, NSWindowOcclusionState};
+use objc2_app_kit::{NSColor, NSView, NSWindow, NSWindowOcclusionState};
 use objc2_quartz_core::{CAMetalLayer, CATransaction};
 
 /// Makes a window fully transparent for as long as this value lives.
@@ -95,6 +95,33 @@ fn metal_layer(ns_view: &NSView) -> Option<Retained<CAMetalLayer>> {
     core::iter::once(layer)
         .chain(sublayers.into_iter().flatten())
         .find_map(|layer| layer.downcast::<CAMetalLayer>().ok())
+}
+
+/// With `SLINT_MACOS_MATCH_BACKGROUND=1`, paints the window and its Metal layer in the
+/// window's background color, so a frame shown before the first drawable is presented
+/// shows that color instead of AppKit's default window background.
+pub(crate) fn match_background(
+    winit_window: &winit::window::Window,
+    color: i_slint_core::graphics::Color,
+) {
+    if std::env::var("SLINT_MACOS_MATCH_BACKGROUND").as_deref() != Ok("1") {
+        return;
+    }
+    let Some(ns_view) = ns_view(winit_window) else { return };
+    let _span = i_slint_common::startup_trace::Span::new("appkit.match_background");
+    let channel = |value: u8| f64::from(value) / 255.;
+    let ns_color = NSColor::colorWithSRGBRed_green_blue_alpha(
+        channel(color.red()),
+        channel(color.green()),
+        channel(color.blue()),
+        channel(color.alpha()),
+    );
+    if let Some(ns_window) = ns_view.window() {
+        ns_window.setBackgroundColor(Some(&ns_color));
+    }
+    if let Some(layer) = metal_layer(ns_view) {
+        layer.setBackgroundColor(Some(&ns_color.CGColor()));
+    }
 }
 
 fn reveal_delay() -> Option<Duration> {

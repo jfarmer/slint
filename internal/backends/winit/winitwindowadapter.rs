@@ -1790,6 +1790,16 @@ impl WinitWindowAdapter {
                 }
             }
 
+            #[cfg(target_os = "macos")]
+            if !self.transparent.get()
+                && let Some(window_item) = WindowInner::from_pub(self.window()).window_item()
+            {
+                crate::macos::match_background(
+                    &winit_window,
+                    window_item.as_pin_ref().background().color(),
+                );
+            }
+
             {
                 let _span = i_slint_common::startup_trace::Span::new("winit.set_native_visible");
                 winit_window.set_visible(true);
