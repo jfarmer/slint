@@ -461,6 +461,7 @@ impl WGPURenderer {
 
     /// Creates a new renderer for the device.
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Self {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.setup").entered();
         let module = wgpu::ShaderModuleDescriptor {
             label: Some("femtovg"),
             source: wgpu::ShaderSource::Wgsl(
@@ -472,7 +473,9 @@ impl WGPURenderer {
                 .into(),
             ),
         };
+        let shader = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.shader_module").entered();
         let shader_module = Rc::new(device.create_shader_module(module));
+        drop(shader);
 
         let texture_descriptor = wgpu::TextureDescriptor {
             size: wgpu::Extent3d::default(),
@@ -752,6 +755,7 @@ impl Renderer for WGPURenderer {
         verts: &[super::Vertex],
         commands: Vec<super::Command>,
     ) -> Self::CommandBuffer {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.encode").entered();
         if commands.is_empty() {
             return None;
         }
@@ -1016,6 +1020,7 @@ impl Renderer for WGPURenderer {
     }
 
     fn alloc_image(&mut self, info: crate::ImageInfo) -> Result<Self::Image, crate::ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.texture_allocate").entered();
         Ok(Image {
             texture: Texture::Internal(self.device.create_texture(&wgpu::TextureDescriptor {
                 label: None,
@@ -1070,6 +1075,7 @@ impl Renderer for WGPURenderer {
         x: usize,
         y: usize,
     ) -> Result<(), crate::ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.texture_write").entered();
         use rgb::ComponentBytes;
 
         data.check_update(&image.info, x, y)?;
@@ -2168,6 +2174,7 @@ impl PipelineState {
         pipeline_layout: &wgpu::PipelineLayout,
         shader_module: &wgpu::ShaderModule,
     ) -> wgpu::RenderPipeline {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.pipeline_create").entered();
         // Exhaustively bind the key so adding a field or leaving one unused here is a compile error.
         let Self {
             render_to_texture,
@@ -2329,6 +2336,7 @@ impl BindGroupState {
         sampler_cache: &RefCell<HashMap<crate::ImageFlags, wgpu::Sampler>>,
         uniform_buffer: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.wgpu.bind_group").entered();
         let (main_texture_view, main_sampler) = RenderPassBuilder::create_binding_resource_and_sampler(
             device,
             images,

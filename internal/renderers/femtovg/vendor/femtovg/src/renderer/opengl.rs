@@ -1271,6 +1271,7 @@ impl Renderer for OpenGl {
         verts: &[Vertex],
         commands: Vec<Command>,
     ) {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.execute").entered();
         self.current_program = 0;
         self.current_program_clips = (false, false);
         self.main_program().bind();
@@ -1392,6 +1393,7 @@ impl Renderer for OpenGl {
     }
 
     fn alloc_image(&mut self, info: ImageInfo) -> Result<Self::Image, ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.texture_allocate").entered();
         Self::Image::new(&self.context, info, self.is_opengles_2_0)
     }
 
@@ -1418,6 +1420,7 @@ impl Renderer for OpenGl {
         x: usize,
         y: usize,
     ) -> Result<(), ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.texture_write").entered();
         image.update(&self.context, data, x, y, self.is_opengles_2_0)
     }
 

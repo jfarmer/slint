@@ -175,10 +175,13 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
         surface_size: i_slint_core::api::PhysicalSize,
         post_render_cb: Option<&dyn Fn(&mut dyn ItemRenderer)>,
     ) -> Result<DrawOutcome, i_slint_core::platform::PlatformError> {
+        let _render = tracing::info_span!(target: "alustin_startup", "femtovg.render").entered();
+        let acquire = tracing::info_span!(target: "alustin_startup", "femtovg.acquire").entered();
         let surface = match self.graphics_backend.begin_surface_rendering()? {
             BeginRendering::Acquired(s) => s,
             BeginRendering::Skipped(outcome) => return Ok(outcome),
         };
+        drop(acquire);
         let render_target = surface.initial_render_target();
 
         if self.rendering_first_time.take() {
@@ -204,6 +207,7 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
         let window_inner = WindowInner::from_pub(window);
         let scale = window_inner.scale_factor().ceil();
 
+        let draw_contents = tracing::info_span!(target: "alustin_startup", "femtovg.draw_contents").entered();
         window_inner
             .draw_contents(|components, post_render| -> Result<(), PlatformError> {
                 // self.canvas is checked for being Some(...) at the beginning of this function
@@ -254,8 +258,10 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                     // the back buffer, in order to allow the callback to provide its own rendering of the background.
                     // femtovg's clear_rect() will merely schedule a clear call, so flush right away to make it immediate.
 
+                    let clear = tracing::info_span!(target: "alustin_startup", "femtovg.notifier_clear_flush").entered();
                     let commands = femtovg_canvas.flush_to_output(surface.render_output());
                     self.graphics_backend.submit_commands(commands);
+                    drop(clear);
 
                     femtovg_canvas.set_size(window_size.width, window_size.height, scale);
                     select_render_target(&mut femtovg_canvas, render_target);
@@ -301,6 +307,7 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                     }
                 }
 
+                let items = tracing::info_span!(target: "alustin_startup", "femtovg.component_items").entered();
                 for (component, origin) in components {
                     if let Some(component) = ItemTreeWeak::upgrade(component) {
                         i_slint_core::item_rendering::render_component_items(
@@ -312,6 +319,7 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                     }
                 }
 
+                drop(items);
                 post_render(&mut item_renderer);
 
                 if let Some(cb) = post_render_cb.as_ref() {
@@ -323,21 +331,29 @@ impl<B: GraphicsBackend> FemtoVGRenderer<B> {
                     collector.measure_frame_rendered(&mut item_renderer, metrics);
                 }
 
+                let flush = tracing::info_span!(target: "alustin_startup", "femtovg.final_flush").entered();
                 let commands = canvas.borrow_mut().flush_to_output(surface.render_output());
+                drop(flush);
+                let submit = tracing::info_span!(target: "alustin_startup", "femtovg.submit").entered();
                 self.graphics_backend.submit_commands(commands);
+                drop(submit);
+                let cleanup = tracing::info_span!(target: "alustin_startup", "femtovg.cleanup").entered();
 
                 // Delete any images and layer images (and their FBOs) before making the context not current anymore, to
                 // avoid GPU memory leaks.
                 self.texture_cache.borrow_mut().drain();
                 drop(item_renderer);
+                drop(cleanup);
                 Ok(())
             })
             .unwrap_or(Ok(()))?;
+        drop(draw_contents);
 
         if let Some(callback) = self.rendering_notifier.borrow_mut().as_mut() {
             self.with_graphics_api(|api| callback.notify(RenderingState::AfterRendering, &api))?;
         }
 
+        let _present = tracing::info_span!(target: "alustin_startup", "femtovg.present").entered();
         self.graphics_backend.present_surface(surface)?;
         Ok(DrawOutcome::Success)
     }

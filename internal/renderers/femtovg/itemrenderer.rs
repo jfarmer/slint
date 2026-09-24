@@ -329,6 +329,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         size: LogicalSize,
         _cache: &CachedRenderingData,
     ) {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.text").entered();
         let (horizontal, vertical) = text.alignment();
         let anchor = i_slint_core::item_rendering::text_alignment_anchor(
             size * self.scale_factor,
@@ -348,6 +349,7 @@ impl<'a, R: femtovg::Renderer + TextureImporter> ItemRenderer for GLItemRenderer
         self_rc: &ItemRc,
         size: LogicalSize,
     ) {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.text_input").entered();
         let anchor = i_slint_core::item_rendering::text_alignment_anchor(
             size * self.scale_factor,
             text_input.horizontal_alignment(),
@@ -1001,7 +1003,10 @@ impl<'a, R: femtovg::Renderer + TextureImporter> GlyphRenderer for GLItemRendere
         y_offset: sharedparley::PhysicalLength,
         glyphs_it: &mut dyn Iterator<Item = parley::layout::Glyph>,
     ) {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_run").entered();
+        let font_lookup = tracing::info_span!(target: "alustin_startup", "femtovg.font_lookup").entered();
         let font_id = font_cache::FONT_CACHE.with(|cache| cache.borrow_mut().font(font));
+        drop(font_lookup);
 
         let glyphs_it = glyphs_it.map(|glyph| femtovg::PositionedGlyph {
             x: glyph.x,

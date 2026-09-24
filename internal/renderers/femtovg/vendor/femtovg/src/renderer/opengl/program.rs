@@ -13,6 +13,7 @@ pub struct Shader {
 
 impl Shader {
     pub fn new(context: &Rc<glow::Context>, src: &str, kind: u32) -> Result<Self, ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.shader_compile").entered();
         let id = unsafe { context.create_shader(kind).unwrap() };
 
         // Compile
@@ -63,6 +64,7 @@ pub struct Program {
 
 impl Program {
     pub fn new(context: &Rc<glow::Context>, shaders: &[Shader], attrib_locations: &[&str]) -> Result<Self, ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.program_link").entered();
         let program = Self {
             context: context.clone(),
             id: unsafe { context.create_program().unwrap() },
@@ -214,6 +216,7 @@ impl MainProgram {
         with_glyph_texture: bool,
         (with_clip_shape, with_clip_mask): (bool, bool),
     ) -> Result<Self, ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.gl.program_create").entered();
         let startup_trace = std::env::var("SLINT_TRACE_RENDERER_STARTUP").as_deref() == Ok("1");
         let started = std::time::Instant::now();
         let shader_defs = if antialias { "#define EDGE_AA 1" } else { "" };

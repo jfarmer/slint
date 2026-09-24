@@ -262,6 +262,11 @@ path = "tests/zero_area_fill_wgpu.rs"
 name = "zoom_invariance_wgpu"
 path = "tests/zoom_invariance_wgpu.rs"
 
+[dependencies.tracing]
+version = "0.1"
+default-features = false
+features = ["std"]
+
 [dependencies.bitflags]
 version = "2.6.0"
 

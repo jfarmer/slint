@@ -771,6 +771,7 @@ impl GlyphAtlas {
         subpixel_x: f32,
         normalized_coords: &[i16],
     ) -> Result<Option<RenderedGlyph>, ErrorKind> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_cache_miss").entered();
         use swash::scale::{Render, Source, StrikeWith};
         use swash::zeno::Format;
 
@@ -780,6 +781,8 @@ impl GlyphAtlas {
         };
 
         let image = {
+            let _span = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_rasterize").entered();
+            let build = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_scaler_build").entered();
             let mut scale_context = self.swash_scale_context.borrow_mut();
             let scaler_builder = scale_context
                 .builder(font_ref)
@@ -787,6 +790,8 @@ impl GlyphAtlas {
                 .hint(true)
                 .normalized_coords(normalized_coords);
             let mut scaler = scaler_builder.build();
+            drop(build);
+            let _raster = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_render").entered();
 
             Render::new(&[
                 Source::ColorOutline(0),
@@ -847,6 +852,7 @@ impl GlyphAtlas {
         let target_x = dst_x + GLYPH_MARGIN as usize;
         let target_y = dst_y + GLYPH_MARGIN as usize;
 
+        let _upload = tracing::info_span!(target: "alustin_startup", "femtovg.glyph_upload").entered();
         let img = imgref::Img::new(&pixels[..], padded_width, padded_height);
         canvas.update_image(dst_image_id, crate::image::ImageSource::from(img), target_x, target_y)?;
 

@@ -137,6 +137,7 @@ impl<R: femtovg::Renderer + TextureImporter> Texture<R> {
         scaling: ImageRendering,
         tiling: (ImageTiling, ImageTiling),
     ) -> Option<Rc<Self>> {
+        let _span = tracing::info_span!(target: "alustin_startup", "femtovg.image_upload").entered();
         let image_flags = base_image_flags(scaling, tiling);
 
         let image_id = match image {
