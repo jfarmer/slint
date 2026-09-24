@@ -45,6 +45,30 @@ pub fn system_collection(shared: bool) -> fontique::Collection {
     create()
 }
 
+/// Resolves the system fallback for Han text on a clone of `collection`, on a background thread,
+/// and discards the answer. Fontique resolves that fallback for every query, and on macOS the
+/// process's first such CoreText lookup takes milliseconds that later ones don't.
+/// Does nothing when the collection does not discover the system fonts.
+pub fn spawn_han_fallback_warm_up(collection: &fontique::Collection) {
+    if !system_fonts_requested() || cfg!(miri) {
+        return;
+    }
+    let mut warm_up = collection.clone();
+    #[cfg(target_os = "macos")]
+    let qos_class = crate::qos::current();
+    let _ = std::thread::Builder::new().name("slint-han-fallback".into()).spawn(move || {
+        #[cfg(target_os = "macos")]
+        crate::qos::raise_self_to(qos_class);
+        let _span = crate::startup_trace::Span::new("fontique.warm_han_fallback");
+        let han = fontique::FallbackKey::new(fontique::Script::from_bytes(*b"Hani"), None);
+        // As in system_collection, the thread has no autorelease pool of its own.
+        #[cfg(target_vendor = "apple")]
+        objc2::rc::autoreleasepool(|_| warm_up.fallback_families(han).for_each(drop));
+        #[cfg(not(target_vendor = "apple"))]
+        warm_up.fallback_families(han).for_each(drop);
+    });
+}
+
 /// Adds the fonts from `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH` to a collection from [`system_collection`].
 /// They become the default font and the generic families.
 pub fn init_collection(mut collection: fontique::Collection, shared: bool) -> Collection {

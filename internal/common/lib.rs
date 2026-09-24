@@ -18,6 +18,10 @@ pub mod key_codes;
 #[cfg(feature = "shared-fontique")]
 pub mod sharedfontique;
 
+#[cfg(all(feature = "shared-fontique", target_os = "macos"))]
+#[doc(hidden)]
+pub mod qos;
+
 pub mod startup_trace;
 
 pub mod styled_text;
