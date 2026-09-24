@@ -318,6 +318,137 @@ pub fn surfaceless_device_descriptor<'a>(
     }
 }
 
+/// Creates the instance of the default configuration, which has no requested graphics API.
+async fn default_instance(backends: wgpu::Backends) -> wgpu::Instance {
+    let _span = i_slint_common::startup_trace::Span::new("wgpu.instance");
+    wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
+        backends,
+        flags: wgpu::InstanceFlags::from_build_config().with_env(),
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        display: None,
+    })
+    .await
+}
+
+/// Selects the adapter of the default configuration and creates its device and queue.
+async fn default_adapter_device_queue(
+    instance: &wgpu::Instance,
+    compatible_surface: Option<&wgpu::Surface<'_>>,
+) -> Result<(wgpu::Adapter, wgpu::Device, wgpu::Queue), Box<dyn std::error::Error + Send + Sync>> {
+    let adapter_span = i_slint_common::startup_trace::Span::new("wgpu.adapter");
+    let adapter = wgpu::util::initialize_adapter_from_env_or_default(instance, compatible_surface)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            alloc::format!("Failed to find an appropriate adapter: {e}").into()
+        })?;
+    drop(adapter_span);
+
+    let _device_span = i_slint_common::startup_trace::Span::new("wgpu.device");
+    let (device, queue) = adapter
+        .request_device(&default_device_descriptor(&adapter))
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            alloc::format!("Failed to create device: {e}").into()
+        })?;
+    Ok((adapter, device, queue))
+}
+
+/// The objects of the default configuration that do not depend on the window's surface.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+struct DefaultDevice {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+}
+
+/// The device being created by [`spawn_default_device`], with the instance backends it uses.
+#[cfg(not(target_arch = "wasm32"))]
+type PendingDefaultDevice = (wgpu::Backends, std::sync::mpsc::Receiver<DefaultDevice>);
+
+#[cfg(not(target_arch = "wasm32"))]
+static PENDING_DEFAULT_DEVICE: std::sync::Mutex<Option<PendingDefaultDevice>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn pending_default_device() -> std::sync::MutexGuard<'static, Option<PendingDefaultDevice>> {
+    PENDING_DEFAULT_DEVICE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Starts creating the instance, adapter, device and queue of the default configuration (no
+/// requested graphics API) on a "slint-gpu-warmup" thread, so that the next initialization
+/// with that configuration and the same backends only creates the surface.
+///
+/// The adapter is selected without a compatible surface; initialization creates its own when
+/// the surface turns out unsupported. After handing the objects over, the thread calls
+/// `warm_up` with its clones of the adapter, device and queue.
+///
+/// Does nothing while an earlier device is still pending, and when the thread cannot be
+/// spawned.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn spawn_default_device(
+    backends_to_avoid: wgpu::Backends,
+    warm_up: impl FnOnce(&wgpu::Adapter, &wgpu::Device, &wgpu::Queue) + Send + 'static,
+) {
+    let _span = i_slint_common::startup_trace::Span::new("gpu_warmup.spawn");
+    let mut pending = pending_default_device();
+    if pending.is_some() {
+        return;
+    }
+    let backends = mask_backends(wgpu::Backends::from_env().unwrap_or_default(), backends_to_avoid);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    #[cfg(target_os = "macos")]
+    let qos_class = i_slint_common::qos::current();
+    let spawned = std::thread::Builder::new().name("slint-gpu-warmup".into()).spawn(move || {
+        #[cfg(target_os = "macos")]
+        i_slint_common::qos::raise_self_to(qos_class);
+        let _span = i_slint_common::startup_trace::Span::new("gpu_warmup.thread")
+            .with_thread_cpu("gpu_warmup.thread.thread_cpu_ns");
+        let instance = poll_once(default_instance(backends))
+            .expect("internal error: wgpu setup is not expected to be async");
+        let Some(Ok((adapter, device, queue))) =
+            poll_once(default_adapter_device_queue(&instance, None))
+        else {
+            return;
+        };
+        let handed_over = DefaultDevice {
+            instance,
+            adapter: adapter.clone(),
+            device: device.clone(),
+            queue: queue.clone(),
+        };
+        if sender.send(handed_over).is_err() {
+            return;
+        }
+        let _span = i_slint_common::startup_trace::Span::new("gpu_warmup.warm_up");
+        warm_up(&adapter, &device, &queue);
+    });
+    if spawned.is_ok() {
+        *pending = Some((backends, receiver));
+    }
+}
+
+/// Returns the objects started by [`spawn_default_device`], waiting for them, when they use
+/// `backends`.
+#[cfg(not(target_arch = "wasm32"))]
+fn take_default_device(backends: wgpu::Backends) -> Option<DefaultDevice> {
+    let (pending_backends, receiver) = pending_default_device().take()?;
+    if pending_backends != backends {
+        return None;
+    }
+    let ready = receiver.try_recv();
+    let waits = matches!(ready, Err(std::sync::mpsc::TryRecvError::Empty));
+    let _span =
+        i_slint_common::startup_trace::Span::new("gpu_warmup.join").with_amount(u64::from(waits));
+    if waits { receiver.recv().ok() } else { ready.ok() }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn take_default_device(_backends: wgpu::Backends) -> Option<DefaultDevice> {
+    None
+}
+
 /// Internal async helper function to initialize the wgpu instance/adapter/device/queue from either scratch or
 /// developer-provided config. This is called by any renderer intending to support WGPU.
 pub async fn async_init_instance_adapter_device_queue_surface(
@@ -435,37 +566,28 @@ pub async fn async_init_instance_adapter_device_queue_surface(
                 .into());
             }
 
-            let instance_span = i_slint_common::startup_trace::Span::new("wgpu.instance");
-            let instance =
-                wgpu::util::new_instance_with_webgpu_detection(wgpu::InstanceDescriptor {
-                    backends,
-                    flags: wgpu::InstanceFlags::from_build_config().with_env(),
-                    backend_options: wgpu::BackendOptions::from_env_or_default(),
-                    memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
-                    display: None,
-                })
-                .await;
-            drop(instance_span);
+            let prepared =
+                if maybe_native_api.is_none() { take_default_device(backends) } else { None };
+            let (instance, prepared) = match prepared {
+                Some(DefaultDevice { instance, adapter, device, queue }) => {
+                    (instance, Some((adapter, device, queue)))
+                }
+                None => (default_instance(backends).await, None),
+            };
 
             let surface = create_surface(&instance)?;
 
-            let adapter_span = i_slint_common::startup_trace::Span::new("wgpu.adapter");
-            let adapter =
-                wgpu::util::initialize_adapter_from_env_or_default(&instance, Some(&surface))
-                    .await
-                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> {
-                        alloc::format!("Failed to find an appropriate adapter: {e}").into()
-                    })?;
-
-            drop(adapter_span);
-            let device_span = i_slint_common::startup_trace::Span::new("wgpu.device");
-            let (device, queue) = adapter
-                .request_device(&default_device_descriptor(&adapter))
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error + Send + Sync + 'static> {
-                    alloc::format!("Failed to create device: {e}").into()
-                })?;
-            drop(device_span);
+            let prepared = prepared.filter(|(adapter, ..)| {
+                let supported = adapter.is_surface_supported(&surface);
+                if !supported {
+                    i_slint_common::startup_trace::record("gpu_warmup.surface_unsupported", 1);
+                }
+                supported
+            });
+            let (adapter, device, queue) = match prepared {
+                Some(prepared) => prepared,
+                None => default_adapter_device_queue(&instance, Some(&surface)).await?,
+            };
             (instance, adapter, device, queue, surface)
         }
         Some(other) => {

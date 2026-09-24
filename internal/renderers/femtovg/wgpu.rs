@@ -462,6 +462,103 @@ impl FemtoVGRenderer<WGPUBackend> {
     }
 }
 
+/// Renders a small scene with FemtoVG into a texture of `format` on `device`, submits it and
+/// drops everything. The scene issues the kinds of drawing the item renderer issues: fills,
+/// strokes, images, glyphs, layers, composite operations and blurs. Their shader translations
+/// and pipeline compilations then have run once in the process before a window's renderer,
+/// which has its own shader module and pipelines, needs them.
+pub fn warm_up_pipelines(device: &wgpu::Device, queue: &wgpu::Queue, format: wgpu::TextureFormat) {
+    use femtovg::{Color, CompositeOperation, ImageFlags, Paint, Path, PixelFormat, RenderTarget};
+
+    const SIZE: u32 = 32;
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("FemtoVG warm-up target"),
+        size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let renderer = femtovg::renderer::WGPURenderer::new(device.clone(), queue.clone());
+    let Ok(mut canvas) = femtovg::Canvas::new(renderer) else {
+        return;
+    };
+    canvas.set_size(SIZE, SIZE, 1.);
+
+    let color = Paint::color(Color::rgbaf(0.2, 0.4, 0.6, 0.8));
+    let size = SIZE as f32;
+    let mut rect = Path::new();
+    rect.rect(1., 1., size - 2., size - 2.);
+    let mut rounded = Path::new();
+    rounded.rounded_rect(2., 2., size - 4., size - 4., 4.);
+    let mut concave = Path::new();
+    concave.move_to(0., 0.);
+    concave.line_to(size, size / 2.);
+    concave.line_to(0., size);
+    concave.line_to(size / 2., size / 2.);
+    concave.close();
+
+    let image = |canvas: &mut femtovg::Canvas<_>, size: u32, format, flags| {
+        canvas.create_image_empty(size as usize, size as usize, format, flags).ok()
+    };
+    let (Some(rgba), Some(gray), Some(layer), Some(blurred)) = (
+        image(&mut canvas, 8, PixelFormat::Rgba8, ImageFlags::empty()),
+        image(&mut canvas, 8, PixelFormat::Gray8, ImageFlags::empty()),
+        image(&mut canvas, SIZE, PixelFormat::Rgba8, ImageFlags::PREMULTIPLIED),
+        image(&mut canvas, SIZE, PixelFormat::Rgba8, ImageFlags::PREMULTIPLIED),
+    ) else {
+        return;
+    };
+    let quads = vec![femtovg::Quad {
+        x0: 1.,
+        y0: 1.,
+        x1: 9.,
+        y1: 9.,
+        s1: 1.,
+        t1: 1.,
+        ..Default::default()
+    }];
+
+    let draw_scene = |canvas: &mut femtovg::Canvas<femtovg::renderer::WGPURenderer>| {
+        canvas.clear_rect(0, 0, SIZE, SIZE, Color::rgbaf(0., 0., 0., 0.));
+        canvas.fill_path(&rect, &color);
+        canvas.fill_path(
+            &rounded,
+            &Paint::linear_gradient(0., 0., size, size, Color::white(), Color::black()),
+        );
+        canvas.fill_path(&concave, &color);
+        canvas.stroke_path(&rounded, &color.clone().with_line_width(2.));
+        canvas.stroke_path(&concave, &color.clone().with_line_width(2.).with_stencil_strokes(true));
+        canvas.fill_path(&rect, &Paint::image(rgba, 0., 0., 8., 8., 0., 1.));
+        canvas.draw_glyph_commands(
+            femtovg::GlyphDrawCommands {
+                alpha_glyphs: vec![femtovg::DrawCommand { image_id: gray, quads: quads.clone() }],
+                color_glyphs: vec![femtovg::DrawCommand { image_id: rgba, quads: quads.clone() }],
+            },
+            &color,
+        );
+        for operation in [CompositeOperation::Copy, CompositeOperation::SourceIn] {
+            canvas.global_composite_operation(operation);
+            canvas.fill_path(&rect, &color);
+            canvas.fill_path(&concave, &color);
+        }
+        canvas.global_composite_operation(CompositeOperation::SourceOver);
+    };
+
+    draw_scene(&mut canvas);
+    canvas.set_render_target(RenderTarget::Image(layer));
+    draw_scene(&mut canvas);
+    canvas.filter_image(blurred, femtovg::ImageFilter::gaussian_blur(2.), layer);
+    canvas.set_render_target(RenderTarget::Screen);
+    canvas.fill_path(&rect, &Paint::image(layer, 0., 0., size, size, 0., 1.));
+    canvas.fill_path(&rect, &Paint::image(blurred, 0., 0., size, size, 0., 1.));
+
+    let commands = canvas.flush_to_output(&target);
+    queue.submit(commands);
+}
+
 struct TextureWindowSurface {
     render_output: femtovg::renderer::WGPURenderOutput,
 }

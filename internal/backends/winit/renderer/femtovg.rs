@@ -210,6 +210,25 @@ fn wgpu_backends_to_avoid() -> i_slint_core::graphics::wgpu_30::wgpu::Backends {
     }
 }
 
+/// Starts creating the wgpu device of the default configuration on a worker thread, which then
+/// warms up FemtoVG's pipelines on it for the Metal surface format, `Bgra8Unorm`.
+#[cfg(all(feature = "renderer-femtovg-wgpu", not(target_arch = "wasm32")))]
+pub(crate) fn spawn_gpu_warmup() {
+    use i_slint_core::graphics::wgpu_30::wgpu;
+    i_slint_core::graphics::wgpu_30::spawn_default_device(
+        wgpu_backends_to_avoid(),
+        |adapter, device, queue| {
+            if adapter.get_info().backend == wgpu::Backend::Metal {
+                i_slint_renderer_femtovg::wgpu::warm_up_pipelines(
+                    device,
+                    queue,
+                    wgpu::TextureFormat::Bgra8Unorm,
+                );
+            }
+        },
+    );
+}
+
 #[cfg(feature = "renderer-femtovg-wgpu")]
 pub struct WGPUFemtoVGRenderer {
     renderer: FemtoVGRenderer<i_slint_renderer_femtovg::wgpu::WGPUBackend>,
