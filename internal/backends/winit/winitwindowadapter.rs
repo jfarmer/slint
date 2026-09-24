@@ -911,7 +911,17 @@ impl WinitWindowAdapter {
         // A timeout or an error ends the wait as well, so that the window can't stay invisible.
         #[cfg(target_os = "macos")]
         if !matches!(outcome, Ok(DrawOutcome::Occluded | DrawOutcome::Skipped)) {
-            self.reveal_on_first_frame.take();
+            let hold = matches!(outcome, Ok(DrawOutcome::Success))
+                && self
+                    .reveal_on_first_frame
+                    .borrow_mut()
+                    .as_mut()
+                    .is_some_and(|reveal| reveal.hold_after_submit());
+            if hold {
+                self.request_redraw();
+            } else {
+                self.reveal_on_first_frame.take();
+            }
         }
         if matches!(outcome?, DrawOutcome::Success) {
             self.first_frame_presented.set(true);

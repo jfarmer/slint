@@ -16,6 +16,8 @@
 //! wgpu fixes this in <https://github.com/gfx-rs/wgpu/pull/10302>.
 //! Remove this module once every wgpu version Slint builds against contains that fix.
 
+use std::time::{Duration, Instant};
+
 use objc2::rc::Retained;
 use objc2_app_kit::{NSView, NSWindow};
 
@@ -24,6 +26,8 @@ use objc2_app_kit::{NSView, NSWindow};
 pub(crate) struct RevealOnFirstFrame {
     ns_window: Retained<NSWindow>,
     alpha: f64,
+    /// With `SLINT_REVEAL_DELAY_MS`, when the hold after the first submitted frame ends.
+    hold_until: Option<Instant>,
 }
 
 impl RevealOnFirstFrame {
@@ -32,8 +36,20 @@ impl RevealOnFirstFrame {
         let alpha = ns_window.alphaValue();
         let _span = i_slint_common::startup_trace::Span::new("appkit.hide_initial_frame");
         ns_window.setAlphaValue(0.0);
-        Some(Self { ns_window, alpha })
+        Some(Self { ns_window, alpha, hold_until: None })
     }
+
+    /// Whether the window stays transparent after a submitted frame.
+    /// `SLINT_REVEAL_DELAY_MS=<n>` keeps it transparent for n ms after the first submitted frame.
+    pub(crate) fn hold_after_submit(&mut self) -> bool {
+        let Some(delay) = reveal_delay() else { return false };
+        let now = Instant::now();
+        now < *self.hold_until.get_or_insert(now + delay)
+    }
+}
+
+fn reveal_delay() -> Option<Duration> {
+    std::env::var("SLINT_REVEAL_DELAY_MS").ok()?.parse().ok().map(Duration::from_millis)
 }
 
 impl Drop for RevealOnFirstFrame {
