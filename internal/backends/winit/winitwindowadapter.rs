@@ -907,6 +907,12 @@ impl WinitWindowAdapter {
         }
 
         let renderer = self.renderer();
+        #[cfg(target_os = "macos")]
+        let transaction = self
+            .reveal_on_first_frame
+            .borrow()
+            .as_ref()
+            .and_then(|reveal| reveal.frame_transaction());
         let outcome = renderer.render(self.window());
         // A timeout or an error ends the wait as well, so that the window can't stay invisible.
         #[cfg(target_os = "macos")]
@@ -923,6 +929,8 @@ impl WinitWindowAdapter {
                 self.reveal_on_first_frame.take();
             }
         }
+        #[cfg(target_os = "macos")]
+        drop(transaction);
         if matches!(outcome?, DrawOutcome::Success) {
             self.first_frame_presented.set(true);
         } else {
