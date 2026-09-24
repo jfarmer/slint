@@ -392,12 +392,12 @@ impl BackendBuilder {
     /// slint::platform::set_platform(Box::new(backend));
     /// ```
     pub fn build(self) -> Result<Backend, PlatformError> {
-        // With SLINT_GPU_WARMUP=1, create the FemtoVG WGPU renderer's device while the event loop
+        // Unless SLINT_GPU_WARMUP=0, create the FemtoVG WGPU renderer's device while the event loop
         // initializes the platform application.
         #[cfg(all(feature = "renderer-femtovg-wgpu", not(target_arch = "wasm32")))]
         if self.renderer_name.as_deref() == Some("femtovg-wgpu")
             && self.requested_graphics_api.is_none()
-            && std::env::var("SLINT_GPU_WARMUP").as_deref() == Ok("1")
+            && std::env::var("SLINT_GPU_WARMUP").as_deref() != Ok("0")
         {
             renderer::femtovg::spawn_gpu_warmup();
         }
