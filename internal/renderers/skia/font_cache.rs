@@ -11,6 +11,20 @@ use std::num::NonZeroUsize;
 
 const FONT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(64).unwrap();
 
+#[cfg(target_os = "macos")]
+fn core_text_small_collection() -> Option<skia_safe::FontMgr> {
+    use skia_safe::wrapper::PointerWrapper;
+
+    unsafe extern "C" {
+        fn slint_skia_coretext_small_font_manager() -> *mut std::ffi::c_void;
+    }
+
+    // SAFETY: The bridge returns null or transfers one owned SkFontMgr reference.
+    // PointerWrapper adopts that reference; FontMgr's Drop releases it.
+    let manager = unsafe { slint_skia_coretext_small_font_manager() };
+    skia_safe::FontMgr::wrap(manager.cast())
+}
+
 pub struct FontCache {
     font_mgr: skia_safe::FontMgr,
     // Use HashedBlob in key to keep strong reference to font data blob,
@@ -29,10 +43,10 @@ impl Default for FontCache {
                     i_slint_common::startup_trace::record("skia_font_manager_system", 1);
                     skia_safe::FontMgr::new()
                 } else {
-                    match skia_safe::FontMgr::core_text_without_catalogue() {
+                    match core_text_small_collection() {
                         Some(manager) => {
                             i_slint_common::startup_trace::record(
-                                "skia_font_manager_no_catalogue",
+                                "skia_font_manager_small_collection",
                                 1,
                             );
                             manager

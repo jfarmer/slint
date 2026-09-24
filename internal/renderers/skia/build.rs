@@ -20,4 +20,19 @@ fn main() {
     }
 
     println!("cargo:rustc-check-cfg=cfg(slint_nightly_test)");
+    println!("cargo:rerun-if-changed=coretext_font_manager.cpp");
+    println!("cargo:rerun-if-changed=coretext-headers");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        cc::Build::new()
+            .cpp(true)
+            .std("c++17")
+            .define("NDEBUG", None)
+            .flag_if_supported("-fno-rtti")
+            .flag_if_supported("-fno-exceptions")
+            .include("coretext-headers")
+            .file("coretext_font_manager.cpp")
+            .compile("slint_coretext_font_manager");
+        println!("cargo:rustc-link-lib=framework=CoreText");
+        println!("cargo:rustc-link-lib=framework=CoreFoundation");
+    }
 }
