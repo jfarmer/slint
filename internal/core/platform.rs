@@ -75,6 +75,15 @@ pub trait Platform {
     #[doc(hidden)]
     fn bind_context(&self, _ctx: crate::SlintContextWeak, _: crate::InternalToken) {}
 
+    #[cfg(feature = "shared-parley")]
+    #[doc(hidden)]
+    fn take_font_collection(
+        &self,
+        _: crate::InternalToken,
+    ) -> Option<i_slint_common::sharedfontique::fontique::Collection> {
+        None
+    }
+
     #[doc(hidden)]
     #[deprecated(
         note = "i-slint-core takes care of closing behavior. Application should call run_event_loop_until_quit"

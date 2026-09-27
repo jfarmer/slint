@@ -35,6 +35,8 @@ mod winit_compat;
 mod winitwindowadapter;
 use winitwindowadapter::*;
 pub(crate) mod event_loop;
+#[cfg(background_font_collection)]
+mod font_collection;
 mod frame_throttle;
 #[cfg(target_os = "ios")]
 mod ios;
@@ -389,6 +391,9 @@ impl BackendBuilder {
     /// slint::platform::set_platform(Box::new(backend));
     /// ```
     pub fn build(self) -> Result<Backend, PlatformError> {
+        #[cfg(background_font_collection)]
+        let font_collection = font_collection::PendingFontCollection::new();
+
         #[allow(unused_mut)]
         let mut event_loop_builder =
             self.event_loop_builder.unwrap_or_else(winit::event_loop::EventLoop::with_user_event);
@@ -411,6 +416,8 @@ impl BackendBuilder {
         )?);
 
         Ok(Backend {
+            #[cfg(background_font_collection)]
+            font_collection,
             event_loop_state: Default::default(),
             window_attributes_hook: self.window_attributes_hook,
             shared_data,
@@ -711,6 +718,8 @@ impl SharedBackendData {
 /// slint::platform::set_platform(Box::new(Backend::new().unwrap()));
 /// ```
 pub struct Backend {
+    #[cfg(background_font_collection)]
+    font_collection: font_collection::PendingFontCollection,
     event_loop_state: RefCell<Option<crate::event_loop::EventLoopState>>,
     shared_data: Rc<SharedBackendData>,
     custom_application_handler: RefCell<Option<Box<dyn crate::CustomApplicationHandler>>>,
@@ -860,6 +869,14 @@ impl Drop for Backend {
 }
 
 impl i_slint_core::platform::Platform for Backend {
+    #[cfg(background_font_collection)]
+    fn take_font_collection(
+        &self,
+        _: i_slint_core::InternalToken,
+    ) -> Option<i_slint_common::sharedfontique::fontique::Collection> {
+        self.font_collection.take()
+    }
+
     fn bind_context(&self, _ctx: i_slint_core::SlintContextWeak, _: i_slint_core::InternalToken) {
         let _ = self.shared_data.context.set(_ctx.clone());
         #[cfg(xdg_desktop_settings)]

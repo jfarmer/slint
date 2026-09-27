@@ -92,7 +92,10 @@ impl SlintContext {
     /// context has to be explicit about it (e.g. [`Self::new_timer`]).
     pub fn new(platform: Box<dyn Platform + 'static>) -> Self {
         #[cfg(feature = "shared-parley")]
-        let collection = i_slint_common::sharedfontique::create_collection(true);
+        let collection = match platform.take_font_collection(crate::InternalToken) {
+            Some(collection) => i_slint_common::sharedfontique::init_collection(collection, true),
+            None => i_slint_common::sharedfontique::create_collection(true),
+        };
 
         let this = Self(Rc::pin(SlintContextInner {
             platform,

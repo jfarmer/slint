@@ -33,6 +33,24 @@ Slint's text layout system handles the complex process of converting text string
 | `internal/core/styled_text.rs` | Public `StyledText` API, FFI |
 | `internal/common/styled_text.rs` | Markdown/HTML parsing, `Style`/`FormattedSpan`/`StyledTextParagraph` |
 
+## Font Collection Initialization
+
+Each `SlintContext` owns its Fontique collection.
+On macOS, Windows, Linux, and FreeBSD, winit starts constructing that collection before initializing the native event loop.
+The backend owns the worker handle and transfers its result through the internal `Platform::take_font_collection` hook during context construction.
+No pending collection is shared between backends or contexts.
+
+Only system discovery runs on the worker.
+The context's thread reads `SLINT_DEFAULT_FONT` and `SLINT_FONT_PATH` and initializes the source cache after the handoff.
+Runtime font registration, including registration in `bind_context`, follows this initialization.
+Native discovery observes system fonts and Fontconfig configuration earlier, during backend construction.
+Configure those before building the backend.
+
+If no worker was started, or thread creation failed, context construction creates the collection synchronously.
+With unwinding enabled, a worker panic propagates to the context's thread.
+Dropping an unused or failed backend detaches its worker, which drops its result when finished.
+Other backends and platforms retain synchronous construction.
+
 ## Text Layout Pipeline
 
 ```
