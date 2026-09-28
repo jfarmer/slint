@@ -1,0 +1,65 @@
+# Copyright © SixtyFPS GmbH <info@slint.dev>
+# SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
+
+name: Verify Linux font collection
+
+on:
+  push:
+    branches: [verify/font-collection-linux-20260928]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  font-tests:
+    if: github.repository == 'jfarmer/slint'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: false
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_TERM_COLOR: never
+      RUST_BACKTRACE: 1
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: f740dade1c83ef20d294540d04bc501c7eb1c98f
+          persist-credentials: false
+      - uses: ./.github/actions/install-linux-dependencies
+        with:
+          extra-packages: build-essential pkg-config fontconfig fonts-dejavu-core fonts-noto-core fonts-noto-cjk
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: '1.95'
+          key: font-collection-linux
+          save_if: true
+      - name: Record source, toolchain, and system fonts
+        run: |
+          {
+            git rev-parse HEAD
+            rustc --version --verbose
+            cargo --version
+            uname -a
+            fc-match sans-serif
+            fc-match ':lang=ar'
+            fc-match ':lang=zh-cn'
+          } | tee font-collection-environment.log
+      - name: Test context handoff and font selection
+        run: cargo test --locked -p i-slint-core --test font_collection 2>&1 | tee font-collection-core.log
+      - name: Test worker handoff and lifecycle
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --locked -p i-slint-backend-winit --lib \
+            --no-default-features --features renderer-software,x11 \
+            font_collection 2>&1 | tee font-collection-winit.log
+      - name: Upload validation logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-font-collection-results
+          path: font-collection-*.log
+          if-no-files-found: warn
