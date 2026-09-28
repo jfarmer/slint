@@ -27,7 +27,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: f740dade1c83ef20d294540d04bc501c7eb1c98f
+          ref: 76b55521fe277c8216e00c86404d5ea026a7aa8b
           persist-credentials: false
       - uses: ./.github/actions/install-linux-dependencies
         with:
