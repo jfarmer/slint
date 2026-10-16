@@ -2336,6 +2336,7 @@ dependencies = [
  "serde_json",
  "slotmap",
  "swash",
+ "tracing",
  "ttf-parser",
  "unicode-bidi",
  "unicode-segmentation",
@@ -3548,6 +3549,7 @@ dependencies = [
  "icu_decimal",
  "icu_locale_core",
  "icu_provider",
+ "libc",
  "objc2 0.6.5",
  "pulldown-cmark",
  "resvg",
@@ -3780,6 +3782,7 @@ dependencies = [
  "lyon_path",
  "pin-weak",
  "rgb",
+ "tracing",
  "wasm-bindgen",
  "web-sys",
  "wgpu 30.0.1",
@@ -3790,6 +3793,7 @@ name = "i-slint-renderer-skia"
 version = "1.19.0"
 dependencies = [
  "bytemuck",
+ "cc",
  "cfg_aliases",
  "clru",
  "const-field-offset",
