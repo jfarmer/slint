@@ -1,0 +1,659 @@
+//! Headless GPU tests for filter-chain execution (`Canvas::filter_image_chain`),
+//! locking the regression classes browsers shipped in multi-filter chains:
+//! fold-equals-sequential, order sensitivity, orientation stability across
+//! chain shapes, alpha clamping between passes (Firefox bug 1577566), and
+//! degenerate blur parameters (Firefox bugs 619968 / 441368). Skips without a
+//! GPU adapter.
+#![cfg(feature = "wgpu")]
+
+use femtovg::{renderer::WGPURenderer, Canvas, Color, ImageFilter, ImageFlags, Paint, Path, PixelFormat};
+
+mod common;
+use common::headless_device;
+
+const W: u32 = 32;
+const H: u32 = 32;
+
+/// Creates the canvas, the uploaded source image, and the output texture that
+/// every runner in this file shares.
+fn setup(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source_pixels: &[femtovg::rgb::RGBA8],
+) -> (Canvas<WGPURenderer>, femtovg::ImageId, wgpu::Texture) {
+    let target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("chain out"),
+        size: wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+
+    let renderer = WGPURenderer::new(device.clone(), queue.clone());
+    let mut canvas = Canvas::new(renderer).expect("canvas");
+    canvas.set_size(W, H, 1.0);
+
+    let source = canvas
+        .create_image(
+            femtovg::imgref::Img::new(source_pixels, W as usize, H as usize),
+            ImageFlags::empty(),
+        )
+        .expect("source image");
+    (canvas, source, target)
+}
+
+/// Allocates a FLIP_Y | PREMULTIPLIED filter target, the orientation and alpha
+/// convention filter output uses.
+fn filter_target(canvas: &mut Canvas<WGPURenderer>) -> femtovg::ImageId {
+    canvas
+        .create_image_empty(
+            W as usize,
+            H as usize,
+            PixelFormat::Rgba8,
+            ImageFlags::FLIP_Y | ImageFlags::PREMULTIPLIED,
+        )
+        .expect("target image")
+}
+
+/// Composites `filtered` onto white and returns the full RGBA readback.
+fn finish_and_read(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    mut canvas: Canvas<WGPURenderer>,
+    filtered: femtovg::ImageId,
+    target: &wgpu::Texture,
+) -> Vec<u8> {
+    canvas.clear_rect(0, 0, W, H, Color::white());
+    let mut p = Path::new();
+    p.rect(0.0, 0.0, W as f32, H as f32);
+    canvas.fill_path(&p, &Paint::image(filtered, 0.0, 0.0, W as f32, H as f32, 0.0, 1.0));
+
+    let commands = canvas.flush_to_output(target);
+    queue.submit(commands);
+    read_back(device, queue, target)
+}
+
+/// The output texture's pixels, as tightly packed RGBA rows.
+fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, target: &wgpu::Texture) -> Vec<u8> {
+    let unpadded = W * 4;
+    let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let padded = unpadded.div_ceil(align) * align;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: (padded * H) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+    enc.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &target,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(H),
+            },
+        },
+        wgpu::Extent3d {
+            width: W,
+            height: H,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(Some(enc.finish()));
+    let slice = readback.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    let mapped = slice.get_mapped_range().expect("readback");
+    let mut out = vec![0u8; (unpadded * H) as usize];
+    for row in 0..H as usize {
+        let src = row * padded as usize;
+        let dst = row * unpadded as usize;
+        out[dst..dst + unpadded as usize].copy_from_slice(&mapped[src..src + unpadded as usize]);
+    }
+    out
+}
+
+/// Uploads `source_pixels`, runs `chain` through `filter_image_chain` (which
+/// folds internally), composites onto white, and returns the RGBA readback.
+fn run_chain(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source_pixels: &[femtovg::rgb::RGBA8],
+    chain: &[ImageFilter],
+) -> Vec<u8> {
+    let (mut canvas, source, target) = setup(device, queue, source_pixels);
+    let filtered = filter_target(&mut canvas);
+    canvas.filter_image_chain(filtered, chain, source).unwrap();
+    finish_and_read(device, queue, canvas, filtered, &target)
+}
+
+/// Runs the same filters as an explicit sequence of single `filter_image`
+/// passes - no folding - ping-ponging through fresh targets. Each pass clamps
+/// to [0, 1] the way the shader does, so this is the ground truth a folded
+/// chain must reproduce. For solid sources the per-pass orientation flips are
+/// immaterial, so this is used only with solid inputs.
+fn run_sequential(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    source_pixels: &[femtovg::rgb::RGBA8],
+    filters: &[ImageFilter],
+) -> Vec<u8> {
+    let (mut canvas, source, target) = setup(device, queue, source_pixels);
+    let mut src = source;
+    let mut filtered = source;
+    for filter in filters {
+        let dst = filter_target(&mut canvas);
+        canvas.filter_image(dst, *filter, src);
+        src = dst;
+        filtered = dst;
+    }
+    finish_and_read(device, queue, canvas, filtered, &target)
+}
+
+fn px(buf: &[u8], x: u32, y: u32) -> [u8; 3] {
+    let i = ((y * W + x) * 4) as usize;
+    [buf[i], buf[i + 1], buf[i + 2]]
+}
+
+fn solid(color: femtovg::rgb::RGBA8) -> Vec<femtovg::rgb::RGBA8> {
+    vec![color; (W * H) as usize]
+}
+
+fn close(a: u8, b: u8, tol: i32) -> bool {
+    (a as i32 - b as i32).abs() <= tol
+}
+
+/// A chain whose matrices ride a blur's draws renders what the separate
+/// passes render: `SourceAlpha` read by the first draw and a colouring
+/// applied by the second, against the three `filter_image` passes, to the
+/// rounding of one more intermediate.
+#[test]
+fn matrices_fused_into_a_blur_match_the_separate_passes() {
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
+    let alpha = ImageFilter::ColorMatrix {
+        matrix: [
+            0.0, 0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 0.0, 0.0, //
+            0.0, 0.0, 0.0, 1.0, 0.0,
+        ],
+    };
+    let colour = ImageFilter::ColorMatrix {
+        matrix: [
+            0.0, 0.0, 0.0, 0.0, 0.2, //
+            0.0, 0.0, 0.0, 0.0, 0.4, //
+            0.0, 0.0, 0.0, 0.0, 0.8, //
+            0.0, 0.0, 0.0, 0.5, 0.0,
+        ],
+    };
+    let blur = ImageFilter::gaussian_blur(2.0);
+    // Opaque red stripes over transparent ones: alpha varies across the
+    // blur, and the pattern is the same either way up, which the separate
+    // passes (two flips, read as one) need.
+    let src: Vec<femtovg::rgb::RGBA8> = (0..W * H)
+        .map(|i| {
+            let x = i % W;
+            if (x / 8) % 2 == 0 {
+                femtovg::rgb::RGBA8::new(200, 60, 60, 255)
+            } else {
+                femtovg::rgb::RGBA8::new(0, 0, 0, 0)
+            }
+        })
+        .collect();
+    let fused = run_chain(&device, &queue, &src, &[alpha, blur, colour]);
+    let separate = run_sequential(&device, &queue, &src, &[alpha, blur, colour]);
+    let worst = (0..W * H)
+        .map(|i| {
+            let (x, y) = (i % W, i / W);
+            let (a, b) = (px(&fused, x, y), px(&separate, x, y));
+            (0..3).map(|c| (a[c] as i32 - b[c] as i32).abs()).max().unwrap()
+        })
+        .max()
+        .unwrap();
+    assert!(worst <= 2, "fused draws differ from the separate passes by {worst}/255");
+}
+
+/// The single-pass `filter_image` refuses to sample what it writes, while
+/// an in-place chain runs: its one flipping pass is followed by the copy
+/// that reads the image back the right way up, through a scratch, so the
+/// image comes out filtered, not undefined.
+#[test]
+fn an_in_place_chain_runs_through_a_scratch() {
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
+    let src = solid(femtovg::rgb::RGBA8::new(80, 120, 160, 255));
+    let (mut canvas, image, target) = setup(&device, &queue, &src);
+
+    canvas.filter_image(image, ImageFilter::identity(), image);
+    canvas.filter_image_chain(image, &[], image).unwrap();
+    canvas
+        .filter_image_chain(image, &[ImageFilter::brightness(0.5)], image)
+        .unwrap();
+
+    let out = finish_and_read(&device, &queue, canvas, image, &target);
+    assert_eq!(px(&out, W / 2, H / 2), [40, 60, 80]);
+}
+
+/// A folded color run must render identically to running the same filters as
+/// separate `filter_image` passes - the property that lets a range-safe color
+/// run cost one pass. The two sides here execute different numbers of GPU
+/// passes: `run_chain` folds `saturate` and `grayscale` into one matrix,
+/// `run_sequential` runs both. `saturate(0.6)` is range-safe, so the fold is
+/// exact and the results match.
+#[test]
+fn chained_color_matrices_match_sequential() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = solid(femtovg::rgb::RGBA8::new(180, 90, 40, 255));
+    let filters = [ImageFilter::saturate(0.6), ImageFilter::grayscale(0.8)];
+    assert!(
+        filters[0].fold_with(filters[1]).is_some(),
+        "range-safe first matrix should fold (chain runs one pass here)"
+    );
+
+    let chained = run_chain(&device, &queue, &src, &filters);
+    let sequential = run_sequential(&device, &queue, &src, &filters);
+    let a = px(&chained, 16, 16);
+    let b = px(&sequential, 16, 16);
+    for c in 0..3 {
+        assert!(close(a[c], b[c], 2), "folded chain {a:?} vs sequential {b:?}");
+    }
+}
+
+/// A first matrix that can overflow must NOT fold, or the chain would drop the
+/// per-pass clamp and diverge from sequential passes and from browsers.
+/// `brightness(2)` then `saturate(0)` is the witness: folded, the grayscale
+/// reads the unclamped (1.6, 0.2, 0.2); as two passes it reads the clamped
+/// (1.0, 0.2, 0.2). The chain must match the two-pass result.
+#[test]
+fn range_unsafe_first_matrix_matches_sequential_not_fold() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = solid(femtovg::rgb::RGBA8::new(204, 26, 26, 255)); // ~ (0.8, 0.1, 0.1)
+    let filters = [ImageFilter::brightness(2.0), ImageFilter::saturate(0.0)];
+    assert!(
+        filters[0].fold_with(filters[1]).is_none(),
+        "range-unsafe first matrix must not fold"
+    );
+
+    let chained = run_chain(&device, &queue, &src, &filters);
+    let sequential = run_sequential(&device, &queue, &src, &filters);
+    let a = px(&chained, 16, 16);
+    let b = px(&sequential, 16, 16);
+    for c in 0..3 {
+        assert!(close(a[c], b[c], 2), "chain {a:?} must match two passes {b:?}");
+    }
+    // The correct (clamped) grayscale luma of (1.0, 0.2, 0.2) is ~0.370 -> ~94;
+    // an unconditional fold would grayscale (1.6, 0.2, 0.2) -> ~0.498 -> ~127.
+    // Assert we are on the clamped side, well below the folded value.
+    assert!(
+        a[0] < 110,
+        "expected clamped grayscale near 94, got {} (fold would give ~127)",
+        a[0]
+    );
+}
+
+/// blur-then-brighten is not brighten-then-blur: the order of passes must be
+/// preserved across the fold boundaries.
+#[test]
+fn chain_order_is_preserved_across_pass_boundaries() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    // Left half dark, right half bright: blurring first smears before the
+    // brightness clamp, brightening first clamps before the smear - the
+    // blurred boundary column differs.
+    let mut src = solid(femtovg::rgb::RGBA8::new(40, 40, 40, 255));
+    for y in 0..H as usize {
+        for x in (W / 2) as usize..W as usize {
+            src[y * W as usize + x] = femtovg::rgb::RGBA8::new(200, 200, 200, 255);
+        }
+    }
+    let blur = ImageFilter::gaussian_blur(3.0);
+    let bright = ImageFilter::brightness(1.8);
+    let ab = run_chain(&device, &queue, &src, &[blur, bright]);
+    let ba = run_chain(&device, &queue, &src, &[bright, blur]);
+    let a = px(&ab, W / 2, H / 2);
+    let b = px(&ba, W / 2, H / 2);
+    assert!(
+        (a[0] as i32 - b[0] as i32).abs() > 8,
+        "blur-then-brighten {a:?} should differ from brighten-then-blur {b:?} at the boundary"
+    );
+}
+
+/// The orientation contract holds for every chain shape: an asymmetric source
+/// keeps red on top and blue on the bottom through odd and even numbers of
+/// flipping passes, with and without blurs (the render-target FLIP_Y class).
+#[test]
+fn chain_orientation_is_stable_across_shapes() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let mut src = solid(femtovg::rgb::RGBA8::new(0, 0, 255, 255));
+    for i in 0..(W * H / 2) as usize {
+        src[i] = femtovg::rgb::RGBA8::new(255, 0, 0, 255);
+    }
+    let cm = ImageFilter::brightness(1.0);
+    let blur = ImageFilter::gaussian_blur(0.5);
+    let chains: [&[ImageFilter]; 5] = [&[], &[cm], &[cm, cm], &[blur], &[blur, cm, blur]];
+    for (i, chain) in chains.iter().enumerate() {
+        let out = run_chain(&device, &queue, &src, chain);
+        let top = px(&out, W / 2, 3);
+        let bottom = px(&out, W / 2, H - 4);
+        assert!(
+            top[0] > 200 && top[2] < 60,
+            "chain #{i}: top should stay red, got {top:?}"
+        );
+        assert!(
+            bottom[2] > 200 && bottom[0] < 60,
+            "chain #{i}: bottom should stay blue, got {bottom:?} - a swapped pair means a mirrored chain"
+        );
+    }
+}
+
+/// Semi-transparent content keeps its color through multi-pass chains: the
+/// scratches and target carry the premultiplied convention, so alpha is not
+/// re-applied at every pass boundary (which darkened content per pass).
+#[test]
+fn semitransparent_content_survives_chains() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    // Premultiplied half-alpha green.
+    let src = solid(femtovg::rgb::RGBA8::new(20, 90, 20, 128));
+    let out = run_chain(
+        &device,
+        &queue,
+        &src,
+        &[ImageFilter::brightness(1.0), ImageFilter::gaussian_blur(1.0)],
+    );
+    let center = px(&out, 16, 16);
+    // Over white: 0.5*(40,180,40) + 0.5*255 = (147, 217, 147).
+    assert!(
+        close(center[0], 147, 8) && close(center[1], 217, 8) && close(center[2], 147, 8),
+        "half-alpha green through a two-pass chain should stay green, got {center:?}"
+    );
+}
+
+#[test]
+fn direct_blur_converts_straight_alpha_only_on_its_first_pass() {
+    let Some((device, queue)) = headless_device() else {
+        return;
+    };
+    let src = solid(femtovg::rgb::RGBA8::new(40, 180, 40, 128));
+    let (mut canvas, source, target) = setup(&device, &queue, &src);
+    let filtered = filter_target(&mut canvas);
+    canvas.filter_image(filtered, ImageFilter::gaussian_blur(1.0), source);
+    let out = finish_and_read(&device, &queue, canvas, filtered, &target);
+    let center = px(&out, W / 2, H / 2);
+    assert!(
+        close(center[0], 147, 8) && close(center[1], 217, 8) && close(center[2], 147, 8),
+        "straight-alpha color was converted more than once: {center:?}"
+    );
+}
+
+/// An alpha-amplifying matrix feeding a blur must clamp between passes
+/// instead of blowing out to white (the Firefox bug 1577566 class).
+#[test]
+fn alpha_amplifying_matrix_clamps_between_passes() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    // Premultiplied source (femtovg's image convention): color 60/120/200 at
+    // alpha 0.5 stores as 30/60/100.
+    let src = solid(femtovg::rgb::RGBA8::new(30, 60, 100, 128));
+    // Alpha row scales by 100; color rows pass through.
+    let mut m = [0.0f32; 20];
+    m[0] = 1.0;
+    m[6] = 1.0;
+    m[12] = 1.0;
+    m[18] = 100.0;
+    let amplify = ImageFilter::ColorMatrix { matrix: m };
+    let out = run_chain(&device, &queue, &src, &[amplify, ImageFilter::gaussian_blur(1.0)]);
+    let center = px(&out, 16, 16);
+    // Alpha clamps to 1.0, so the composite over white shows the source color
+    // itself; unclamped alpha would wash the color toward white or blow out.
+    assert!(
+        close(center[0], 60, 12) && close(center[1], 120, 12) && close(center[2], 200, 12),
+        "amplified-alpha chain should clamp and show the source color, got {center:?}"
+    );
+}
+
+/// Degenerate blur parameters flow through chains without killing the output:
+/// sigma 0 passes through (Firefox bug 619968) and a huge sigma stays finite
+/// and bounded rather than overflowing (Firefox bug 441368): the solid's
+/// mass spreads far beyond its 32 px, so over the white canvas what is left
+/// at the center is a faint tint of the color, never garbage or black.
+#[test]
+fn degenerate_blur_parameters_stay_bounded() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src = solid(femtovg::rgb::RGBA8::new(200, 60, 60, 255));
+    let out = run_chain(
+        &device,
+        &queue,
+        &src,
+        &[ImageFilter::gaussian_blur(0.0), ImageFilter::brightness(1.0)],
+    );
+    let center = px(&out, 16, 16);
+    assert!(
+        close(center[0], 200, 20) && close(center[1], 60, 20),
+        "a sigma-0 chain must keep the solid color, got {center:?}"
+    );
+    let out = run_chain(
+        &device,
+        &queue,
+        &src,
+        &[ImageFilter::gaussian_blur(2147483648.0), ImageFilter::brightness(1.0)],
+    );
+    let center = px(&out, 16, 16);
+    assert!(
+        center[0] >= 200 && center[1] >= 60 && center[0] >= center[1],
+        "a huge sigma must leave a bounded, faint tint of the solid, got {center:?}"
+    );
+}
+
+/// A crop clips a pass's result to its rectangle whichever way the image is
+/// stored at that point of the chain: after one draw from an upload, after
+/// one draw from a render target, and on a blur's second draw. Inside the
+/// rect the source shows; outside it nothing does.
+#[test]
+fn a_crop_clips_a_pass_whichever_way_its_image_is_stored() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    // No two rows and no two columns alike: a crop at the wrong rows shows.
+    let src: Vec<femtovg::rgb::RGBA8> = (0..W * H)
+        .map(|i| femtovg::rgb::RGBA8::new((i % W * 8) as u8, (i / W * 8) as u8, 0, 255))
+        .collect();
+    let crop = ImageFilter::Crop {
+        x: 3.0,
+        y: 5.0,
+        width: 10.0,
+        height: 6.0,
+    };
+    let copy = ImageFilter::brightness(1.0);
+    let expect = |out: &[u8], what: &str| {
+        for y in 0..H {
+            for x in 0..W {
+                let inside = (3..13).contains(&x) && (5..11).contains(&y);
+                let want = if inside {
+                    [(x * 8) as u8, (y * 8) as u8, 0]
+                } else {
+                    [255, 255, 255]
+                };
+                assert_eq!(px(out, x, y), want, "{what}: ({x}, {y})");
+            }
+        }
+    };
+    expect(
+        &run_chain(&device, &queue, &src, &[copy, crop]),
+        "a draw from an upload",
+    );
+    expect(
+        &run_chain(&device, &queue, &src, &[ImageFilter::gaussian_blur(0.0), crop]),
+        "a blur's second draw",
+    );
+    expect(&run_chain(&device, &queue, &src, &[crop]), "a crop alone");
+    expect(
+        &run_chain(&device, &queue, &src, &[copy, copy, crop, copy]),
+        "passes on both sides",
+    );
+
+    // From a render target: the upload copied into one first.
+    let (mut canvas, source, target) = setup(&device, &queue, &src);
+    let stored = filter_target(&mut canvas);
+    canvas.filter_image_chain(stored, &[], source).unwrap();
+    let filtered = filter_target(&mut canvas);
+    canvas.filter_image_chain(filtered, &[copy, crop], stored).unwrap();
+    expect(
+        &finish_and_read(&device, &queue, canvas, filtered, &target),
+        "a draw from a render target",
+    );
+}
+
+/// What a crop clips away does not come back: content shifted out of the
+/// rect and back loses the part that left, as a filter primitive's result
+/// clipped to its subregion does in a browser. Without the crop the two
+/// shifts cancel.
+#[test]
+fn what_a_crop_clips_away_does_not_come_back() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let mut src = solid(femtovg::rgb::RGBA8::new(0, 0, 0, 0));
+    for y in 8..16 {
+        for x in 8..16 {
+            src[(y * W + x) as usize] = femtovg::rgb::RGBA8::new(255, 0, 0, 255);
+        }
+    }
+    let (out, back) = (
+        ImageFilter::Offset { dx: 12.0, dy: 0.0 },
+        ImageFilter::Offset { dx: -12.0, dy: 0.0 },
+    );
+    let region = ImageFilter::Crop {
+        x: 0.0,
+        y: 0.0,
+        width: 24.0,
+        height: H as f32,
+    };
+    let cancelled = run_chain(&device, &queue, &src, &[out, back]);
+    let clipped = run_chain(&device, &queue, &src, &[out, region, back]);
+    for y in 0..H {
+        for x in 0..W {
+            let square = (8..16).contains(&x) && (8..16).contains(&y);
+            let red_or_white = |red: bool| if red { [255, 0, 0] } else { [255, 255, 255] };
+            assert_eq!(
+                px(&cancelled, x, y),
+                red_or_white(square),
+                "without the crop: ({x}, {y})"
+            );
+            // Shifted out, the square spans x 20..28: the crop keeps 20..24, which comes back as 8..12.
+            assert_eq!(px(&clipped, x, y), red_or_white(square && x < 12), "({x}, {y})");
+        }
+    }
+}
+
+/// A crop ahead of a blur wide enough to run down the pyramid is taken at
+/// full size, before the first halving: the chain renders what the crop and
+/// the blur render as two chains, one after the other.
+#[test]
+fn a_crop_before_a_wide_blur_is_taken_at_full_size() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let src: Vec<femtovg::rgb::RGBA8> = (0..W * H)
+        .map(|i| femtovg::rgb::RGBA8::new((i % W * 8) as u8, (i / W * 8) as u8, 0, 255))
+        .collect();
+    let crop = ImageFilter::Crop {
+        x: 14.0,
+        y: 6.0,
+        width: 12.0,
+        height: 20.0,
+    };
+    let (copy, blur) = (ImageFilter::brightness(1.0), ImageFilter::gaussian_blur(12.0));
+    let one_chain = run_chain(&device, &queue, &src, &[copy, crop, blur]);
+
+    let (mut canvas, source, target) = setup(&device, &queue, &src);
+    let cropped = filter_target(&mut canvas);
+    canvas.filter_image_chain(cropped, &[copy, crop], source).unwrap();
+    let blurred = filter_target(&mut canvas);
+    canvas.filter_image_chain(blurred, &[blur], cropped).unwrap();
+    let two_chains = finish_and_read(&device, &queue, canvas, blurred, &target);
+
+    let uncropped = run_chain(&device, &queue, &src, &[copy, blur]);
+    let differs = |a: &[u8], b: &[u8]| a.iter().zip(b).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(differs(&one_chain, &uncropped) > 40, "the crop shows through the blur");
+    assert!(
+        differs(&one_chain, &two_chains) <= 2,
+        "one chain is {} of 255 from the two",
+        differs(&one_chain, &two_chains)
+    );
+}
+
+/// A layer's crop is given in root device space, as a blend's backdrop rect
+/// is: it lands where it was set whatever the origin of the layer's store,
+/// which the scissor and the chain's reach move.
+#[test]
+fn a_layer_crops_its_chain_in_root_space() {
+    let Some((device, queue)) = headless_device() else {
+        eprintln!("skipping: no wgpu adapter available");
+        return;
+    };
+    let (mut canvas, _source, target) = setup(&device, &queue, &solid(femtovg::rgb::RGBA8::new(0, 0, 0, 0)));
+    canvas.clear_rect(0, 0, W, H, Color::white());
+    canvas.scissor(6.0, 9.0, 20.0, 18.0);
+    let effects = femtovg::LayerEffects::new().with_filters(&[
+        ImageFilter::Offset { dx: 3.0, dy: 0.0 },
+        ImageFilter::Crop {
+            x: 10.0,
+            y: 12.0,
+            width: 7.0,
+            height: 5.0,
+        },
+    ]);
+    assert!(canvas.begin_layer(&effects));
+    let mut everything = Path::new();
+    everything.rect(0.0, 0.0, W as f32, H as f32);
+    canvas.fill_path(&everything, &Paint::color(Color::rgb(255, 0, 0)));
+    canvas.end_layer();
+    queue.submit(canvas.flush_to_output(&target));
+    let out = read_back(&device, &queue, &target);
+    for y in 0..H {
+        for x in 0..W {
+            let inside = (10..17).contains(&x) && (12..17).contains(&y);
+            let want = if inside { [255, 0, 0] } else { [255, 255, 255] };
+            assert_eq!(px(&out, x, y), want, "({x}, {y})");
+        }
+    }
+}

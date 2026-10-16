@@ -1,0 +1,749 @@
+# Changelog
+All notable changes to this project will be documented in this file.
+
+## [Unreleased]
+
+- Fixed text getting the width it had at an earlier letter spacing when both
+  letter spacings were below a tenth of a device pixel (every negative one
+  included) or in the same tenth above that (e.g., 2 and 2.05):
+  `measure_text` returned the earlier width, `break_text` broke the text by
+  it, and centered or right-aligned text started in the wrong place.
+- Curves are flattened closer to their shape: each point between two chords
+  is moved outward, so the chords cross the curve instead of cutting inside
+  every bend, and the flattening tolerance is halved. Round joins and caps
+  take a few more segments with it, 1.25 times as many for a 20 px stroke.
+- Filling a path costs less CPU and vertex memory, with identical output:
+  curves are flattened in a loop rather than by recursion, a contour turned
+  round for a fill keeps the directions it had, and a fill's vertices are
+  its fan - one a point, where they were three a triangle - drawn as fans on
+  OpenGL and as one index list a frame on WGPU and WebGL.
+- **Breaking:** `CompositeOperation` and `BlendFactor` are now
+  `#[non_exhaustive]`: a `match` on either needs a wildcard arm.
+- Fixed a `Path` extended (`line_to`, `rect`, ...) after it had been drawn or
+  hit-tested still being drawn and hit-tested as the old path under the same
+  transform: the flattened copy a `Path` keeps was not dropped when verbs were
+  added.
+- Fixed the WGPU backend rebuilding render pipelines every frame when a frame
+  takes several flushes: each flush dropped every pipeline it did not use.
+  Pipelines now stay cached across flushes, and past 512 the least recently
+  used are dropped first.
+- Fixed the WGPU backend ignoring `ImageFlags::GENERATE_MIPMAPS`: an image
+  created with it now gets its mip levels, filled after every upload the way
+  the OpenGL backend's `glGenerateMipmap` fills them, and is sampled with
+  mipmap filtering, so a raster drawn smaller than its size is box-filtered
+  instead of point-sampled from the base level. Both backends now sample an
+  image half a level toward the larger mip, where the browsers' minification
+  sits (Chromium samples the larger level, Firefox downsamples directly).
+  The levels cost a third more texture memory for those images only; the
+  downsample pipeline is built on the first such upload.
+- Fixed a panic with the `swash` and `textlayout` features when text with PNG
+  bitmap glyphs (color emoji) is drawn outside the glyph atlas: under a
+  rotated, skewed, flipped or non-uniformly scaled transform, larger than 92
+  pixels, or scaled with a gradient or image paint.
+- Added `ImageFilter::Morphology`, `ImageFilter::Offset` and
+  `ImageFilter::Crop`, the SVG `feMorphology` and `feOffset` primitives and
+  the subregion a primitive's result is clipped to: a dilation grows the opaque
+  regions of an image by a whole-pixel radius per axis and an erosion
+  shrinks them (the per-channel maximum or minimum within the radius, as
+  two draws like the blur, a radius above the 24 pixels one draw covers
+  running as passes whose radii sum to it), and an offset shifts the image
+  by a device-pixel vector, transparent beyond its edge. A layer pads its
+  store by a morphology's radius - a dilation reaches that far out, an
+  erosion reads that far beyond the store - and by an offset's shift, as it
+  does by a blur's reach. Together with `SourceAlpha` as a color matrix they run the spread
+  shadow chain Sketch exports (`feMorphology`, `feOffset`, `feGaussianBlur`,
+  `feColorMatrix`) as one layer filter. A crop leaves an image transparent
+  outside a rectangle; after another filter of a chain it is that filter's
+  pass drawn inside the rectangle, at no pass of its own.
+- A Gaussian blur whose standard deviation on an axis is above the 8 device
+  pixels one shader pass covers now runs at a downsampled size, the way
+  Skia's GPU blur does: a filter chain, a layer filter or a shadow halves
+  its image along that axis until the sigma fits one pass, blurs there and
+  scales the result back up bilinearly,
+  instead of running `(sigma / 8)^2` full-size passes. A sigma-77 blur of a
+  1080p layer is four halvings, a blur over a sixteenth of the pixels
+  where it was 93 full-size blurs, so it no longer exceeds the
+  filter work budget, which had left the layer unblurred; the sigma ceiling
+  rises from 128 to 512; blurs within the bound render as before. The blur
+  shader also reads transparent beyond the image it samples instead of
+  extending its edge texels, so a blurred image fades at its border as it
+  does in a browser.
+- `ImageFilter::GaussianBlur` now takes a standard deviation per axis
+  (`sigma_x`, `sigma_y`), SVG's two-valued `feGaussianBlur stdDeviation`: a
+  blur along one axis renders as a streak or a glow instead of spreading the
+  larger value both ways. Each axis splits into its own passes above the
+  per-pass bound, an unblurred axis copies through, and a layer pads each axis
+  by its own reach. `ImageFilter::gaussian_blur(sigma)` builds the isotropic
+  blur the single `sigma` field used to.
+- Added `LayerEffects::with_blend`: a layer composited with a `BlendMode`, CSS
+  `mix-blend-mode` and SVG's on a group. The finished layer, at its opacity,
+  is blended with what lies under it on the target it was opened on, which
+  must be an image or an enclosing layer; on the screen, or when the two
+  transients it needs do not fit the budget, the layer composites normally.
+  Fixes the solidJS banner's color-burn overlay. Also fixed the multiply, screen
+  and hard-light groups in Firefox, BuseyBench, and WPT reference examples.
+- Fixed the WGPU backend building the same render pipelines again for each
+  paint type (color, gradient, image) and for text.
+- Sped up glyph rasterization with the `swash` feature by letting swash reuse
+  its scaler and hinting caches across glyphs.
+- Added `Canvas::with_render_target`: a side pass on another target that goes
+  back to the one that was current, an open layer's store included.
+- Added `ImageFilter::Blend`: blends the filtered image over a second image
+  with any of the sixteen `BlendMode`s of the Compositing and Blending
+  specification (multiply, screen, overlay, ..., luminosity), the SVG
+  `feBlend` primitive. The backdrop is placed at a rect, in root device space
+  for a layer's filters, so a chain can blend a group with an image rendered
+  elsewhere. Fixes the multiply grain and tint layers of seven BuseyBench
+- Fixed a fill of a path whose points all lie on one line - a bare `<line>`
+  or an open path under SVG's default black fill - drawing a two-pixel line
+  where browsers draw nothing; such a contour no longer counts when the
+  path's other contours are told apart as holes or solids. Fixes #341.
+- Fixed a layer's shadow missing the shadow of content outside the scissor
+  (or the canvas): the capture now takes in whatever reaches into view once
+  shifted by the shadow offset and spread by its blur, so an SVG
+  `feDropShadow` cast from beyond a clip or the viewport lands inside it as
+  browsers draw it. A capture the reach would push past the texture limit or
+  the transient budget keeps the store it had and gives the reach the room
+  that is left, instead of passing through. Fixed multiple instances of wrong
+  pixels in BuseyBench and WPT reference tests.
+- Added support for the `wasm32-unknown-emscripten` target.
+- Fixed a two-stop two-point radial gradient (`Paint::two_point_radial_gradient`)
+  interpolating in premultiplied space, which lost a semi-transparent stop's hue
+  instead of fading it in like every other gradient variant.
+- `save()` no longer grows the state stack past 16,384 nested levels: deeper
+  saves still pair with their restores, but nothing draws there and the state
+  changes made there are discarded.
+- Fixed Gaussian blurs wider than one blur pass can render (a standard deviation
+  above 8 device pixels) coming out narrower than requested. A layer filter, a
+  filter chain or a shadow blurred past that limit now runs as several passes
+  that compose to the requested width, and its offscreen padding follows the
+  true reach; blurs within the limit render exactly as before. The wgpu backend
+  also reuses one blur buffer across passes instead of allocating one per pass.
+  Fixes the Google Workspace SVG icon, amongst several others.
+- Fixed strokes thinner than a pixel drawing too faint: their alpha was scaled
+  by the square of the device width (a nanovg heuristic), so a 0.2 px line
+  carried 4% of its coverage and a 0.5 px line 25%. The scale is now linear -
+  a 0.5 px line is 50% - which is the coverage Skia's hairline path puts down
+  and what both browsers render. Fine detail drawn with sub-pixel strokes
+  (hatching, iris lines, thin outlines at small zoom) was visibly lighter than
+  in a browser before.
+- Fixed filled paths landing a pixel too wide when the contour runs clockwise.
+  The antialiasing fringe is extruded along each point's miter vector, whose
+  direction follows the order the points are in, so a clockwise contour pushed
+  it outward instead of inward - `Path::rect()` and `Path::circle()` emit
+  counter-clockwise and were exact, while an SVG arc with `sweep = 1`, or any
+  imported path wound the other way, was a pixel fat all round. Fills now cover
+  the same pixels either way, and the authored winding still selects holes for
+  `FillRule::NonZero`. This also takes most of the over-inking out of thin
+  filled shapes, which were paying the same pixel on both edges.
+- Added `ImageFilter::Turbulence`, the SVG `feTurbulence` primitive, generated on
+  the GPU from the SVG 1.1 reference algorithm - the same Park-Miller generator
+  and Perlin lattice Chromium and Firefox run, so a seed gives a browser's noise.
+  The lattice is uploaded once per seed as a 512 KB texture with the spec's two
+  dependent permutation lookups pre-composed, so every fetch is addressed
+  straight from the pixel (the shape tile-based mobile GPUs pipeline) at eight
+  fetches per octave for all four channels; the last four seeds stay cached. A
+  `transform` maps noise space onto the output so the pattern scales with the
+  content, and `stitchTiles` is supported. Added `ImageFilter::LinearRgbToSrgb`
+  and `SrgbToLinearRgb`, the sRGB transfer curve as a pass, so a chain can run
+  in linearRGB the way SVG filters do by default and hand back what a browser
+  displays; an adjacent pair folds away.
+- Added `Canvas::filter_image_chain()`, which applies a list of image filters in
+  one call the way a Canvas `ctx.filter` list (`"blur(5px) brightness(1.2)"`) or
+  an SVG filter chain does. Consecutive color-matrix filters fold into a single
+  GPU pass (`ImageFilter::fold_with()`) when doing so is exact - a matrix that
+  can push a channel outside [0, 1] keeps its own pass so its clamp still
+  happens, matching per-filter clamping in browsers and Skia. Non-folding passes
+  share two source-sized scratch images (a blur pass adds one internal buffer of
+  its own), so peak transient memory is bounded regardless of chain length.
+  `ImageFilter::identity()` is the explicit no-op filter.
+- Fixed `ImageFilter::GaussianBlur` with a zero, negative or non-finite
+  standard deviation blanking the image instead of leaving it unchanged, and
+  with a very large one using inconsistent coefficients. Both backends now
+  clamp the value the same way.
+- Fixed multi-stop gradients whose last stop ends before 1.0: the rest of the
+  ramp was left transparent (or holding stale texture data) instead of the last
+  stop's color, as SVG's default `spreadMethod="pad"` and Canvas gradients
+  render it. Showed as a wedge cut out of the Firefox logo's flame.
+- Added `Canvas::clip_path(path, fill_rule)`, which clips later drawing to any
+  path under the current transform - Canvas 2D `clip()` and SVG `clip-path` with
+  `clip-rule` - and is scoped by `save()`/`restore()`, and
+  `Canvas::clip_paths()`, which clips to the union of several paths, each under
+  its own rule, as an SVG `clipPath` with several children does. A clip's edge
+  is antialiased like a fill's and costs no render pass: a clip whose path
+  outlines a rectangle (under any transform), a rounded rectangle - rounded at
+  all four corners or at the two of one side - or an ellipse is evaluated by the
+  fragment shader of each draw under it, a rectangle that cuts such a shape
+  clips with it in the scissor's place, and any other clip is rasterized on the
+  CPU into a coverage mask of one byte a pixel that those shaders read - kept
+  while the clip does not change or moves by whole pixels, within a budget
+  (`Canvas::set_clip_mask_budget()`, 32 MiB by default). A clip the budget has
+  no room for uses a bit of the stencil buffer both backends already have, where
+  its edge is not antialiased. A clip taken while drawing into a layer lives on
+  the layer's store and gates its content, while the clips underneath gate the
+  composite. `clear_rect()` stays a raw clear the clip does not affect; it
+  clears the stencil with the color so a winding count a cover pass missed
+  cannot reach the next frame - the whole stencil, or only the winding bits
+  while a clip is armed on the target.
+- Added layer masks: `LayerEffects::with_mask()` multiplies a layer's alpha by
+  a mask image placed in device space, using either its luminance times alpha
+  (SVG `mask`'s default `mask-type`, via the new
+  `ImageFilter::luminance_to_alpha()`) or its alpha. Masks apply after the
+  layer's filters, as in SVG, and reserve their coverage images with the
+  layer's store, so a masked layer the transient budget cannot fit passes
+  through as a whole (`begin_layer()` returns `false`) rather than composite
+  unmasked.
+- Added layers: `Canvas::begin_layer()` and `end_layer()` draw a group into an
+  offscreen image and composite it back with `LayerEffects` - group opacity, so
+  overlapping shapes fade as one like an SVG group, and/or an image-filter
+  chain. The offscreen image is sized to the current scissor rect (under any
+  axis-aligned scale, so a device-pixel-ratio scale still bounds it) plus the
+  blur reach of the whole chain (successive blurs compound in quadrature),
+  not the whole canvas or render target. A rounded or rotated scissor clips
+  the layer's composite once, after its filters, where it was set - a blur
+  samples content past the clip edge, as SVG's `clip-path` over a filtered
+  group does - instead of also clipping the draws inside the layer (which
+  squared the edge coverage and, in a blur-padded store, landed in the wrong
+  place). `begin_layer()` returns whether the
+  layer captured: `false` means it passed through with its effects dropped -
+  over the transient budget, past the backend's texture limit
+  (`Renderer::max_texture_size()`, 2048 on a VideoCore IV), or degenerate
+  bounds. Layers stay open across a flush of the same size; a `set_size()`
+  that changes the size, and `reset()`, discard open layers as a Canvas 2D
+  reset does. A layer opened under a non-invertible transform draws nothing,
+  as in Canvas 2D. The web-platform-tests layer suite is ported where the API
+  can express it (`tests/wpt_layers_wgpu.rs`). The shadow state in effect at 
+  `begin_layer()` is cast once by the layer's result (the Canvas 2D `beginLayer()` 
+  rule, and what SVG `feDropShadow` on a group means) and resets inside the layer,
+  so children are not each shadowed on their own.
+- A layer's backing images return to a pool at `end_layer()` and the next
+  layer of the same size takes them (commands run in order, so this needs no
+  synchronization; store sizes round up to 64 px so siblings with different
+  blur reaches share one), as do filter-chain scratches and shadow coverage; a
+  frame's transient memory is therefore its deepest nesting, not its layer
+  count - at 1080p a viewport-sized layer is 4.7 MB and thirteen blurred ones
+  would fill 256 MiB, while real artwork opens hundreds per frame.
+  `Canvas::set_transient_image_budget()` caps what is held at once (default
+  256 MiB) and `transient_image_bytes()` reports it; past the cap, layers pass
+  through (`begin_layer()` returns `false` - a layer reserves every image its
+  effects draw through, a filter chain's result and scratches included, with
+  its store, so it is admitted whole or not at all; each open filtered level
+  holds its result and scratches for its whole life, so nesting filtered
+  layers costs their sum), `filter_image_chain()`
+  returns `ErrorKind::TransientImageBudgetExceeded`, and shadows are skipped
+  rather than allocate. Shadow coverage rounds to 8 px, not the layers' 64,
+  since shadows are many and small.
+- Fixed two-stop gradients fading a transparent stop through the wrong colors:
+  the stop's own color was discarded, so `transparent` to blue turned a plain
+  light blue instead of darkening, and transparent red to blue lost its red.
+  Two-stop and multi-stop gradients now interpolate the same way, fixing flame
+  gradient accuracy in Firefox's kit.svg embedded art, and now matching
+  Canvas and SVG gradient behaviors in multiple web browsers.
+- Added two-point radial gradients, the general Canvas
+  `createRadialGradient(x0, y0, r0, x1, y1, r1)` form where the start and end
+  circles can have different centres. New `Paint` constructors
+  `two_point_radial_gradient()` and `two_point_radial_gradient_stops()`;
+  concentric gradients keep using the existing cheaper path.
+- Added gradient transforms, the role of SVG's `gradientTransform`: new `Paint`
+  methods `set_gradient_transform()` and `with_gradient_transform()` transform
+  the gradient without affecting the shape it fills, which is how SVG tools
+  express skewed or unevenly scaled gradients.
+- Fixed the WGPU backend painting a nonzero fill's whole bounding box after an
+  even-odd fill, because the even-odd fill left winding counts in the stencil
+  buffer. Showed as a block above the bow tie of the DuckDuckGo logo.
+
+## [0.27.0] - 2026-08-31
+
+- Added text decoration for `fill_text()` and `stroke_text()`: underline,
+  strikethrough and overline. New `TextDecoration` type, set through
+  `Paint::set_text_decoration()` and `with_text_decoration()`. Line position and
+  thickness come from the font's own metrics.
+- Added `Path::svg_arc_to()`, the SVG path data `A` command: an elliptical arc
+  to an endpoint, with per-axis radii, an x-axis rotation, and the large-arc and
+  sweep flags.
+- Added `ImageFilter::ColorMatrix` (SVG `feColorMatrix`) with constructors for
+  the CSS filter functions: `grayscale()`, `sepia()`, `saturate()`,
+  `hue_rotate()`, `brightness()`, `contrast()`, `invert()` and `opacity()`.
+- Added elliptical radial gradients, matching CSS `radial-gradient(ellipse ...)`.
+  New `Paint` constructors `elliptical_gradient()` and
+  `elliptical_gradient_stops()` take separate radii per axis.
+  `radial_gradient()` and `radial_gradient_stops()` are unchanged.
+- **Breaking:** `PaintFlavor::RadialGradient`'s `in_radius` and `out_radius`
+  changed from `f32` to `(f32, f32)` to hold the per-axis radii. Paints
+  serialized by earlier versions no longer deserialize.
+- Added typesetting metrics to `FontMetrics`: `subscript_size()`,
+  `subscript_offset()`, `superscript_size()`, `superscript_offset()`,
+  `x_height()`, `cap_height()`, `line_gap()`, `underline_position()`,
+  `underline_thickness()`, `strikeout_position()` and `strikeout_thickness()`.
+  Missing or zeroed font tables fall back to conventional em fractions.
+- Added `TextMetrics::baseline()`, the run's baseline in the same space as the
+  glyph positions.
+- Fixed the paragraph base direction of shaped text: it now follows the first
+  strong character (UAX #9 P2/P3) instead of always being left to right, so an
+  Arabic or Hebrew sentence orders its punctuation and embedded words
+  correctly. The shaped word cache now also keys on the run direction, so a word
+  shaped in one direction is no longer reused in the other.
+- Fixed `stroke_text()` line widths under a scaled canvas transform. The width
+  was left unscaled for atlas glyphs and scaled twice for path fallback glyphs,
+  so it changed with the zoom, the font size and the paint.
+- Fixed `Canvas::measure_font()` scaling its result by the internal glyph
+  rasterization scale and the DPI factor. It now reports user space metrics,
+  like `measure_text()` and `TextContext::measure_font()` do.
+- Fixed `measure_text()` returning a run box shifted down by the glyph bearing
+  (about 4.5px at font size 12). `TextMetrics::y` and `height()` are measured
+  from the glyph ink again, not from the baseline.
+- Fixed `Path::rounded_rect()` and `rounded_rect_varying()` squashing corners
+  into ellipses when a radius did not fit. Radii that overlap are now reduced by
+  one common factor, as CSS and the Canvas `roundRect()` algorithm specify, and
+  negative or NaN radii leave the corner square. This changes rendering for
+  shapes whose radii did not fit.
+- Fixed `Path::arc_to()` drawing a thin seam across the fill when the corner
+  could not be rounded, and `Path::arc()` producing NaN control points for a
+  zero sweep (#309).
+- Fixed the WGPU renderer aborting instead of returning an error when
+  `update_image()` is given a copy that reaches past the destination image, or a
+  source in a different pixel format, as the other renderers already did. The
+  shared check is exposed as `ImageSource::check_update()` for out-of-tree
+  renderers.
+- Fixed Gray texture updates being dropped by strict OpenGL drivers: the
+  external format passed to `glTexSubImage2D` is now `RED`, not the sized `R8`,
+  which is invalid there.
+- Fixed OpenGL textures being created with undefined contents, which could show
+  up as specks at glyph edges on embedded drivers (#310). They are now zeroed at
+  creation, as the WGPU backend already guaranteed.
+- Sped up the WGPU backend, most of all on WebAssembly. The frame's uniforms go
+  into one buffer, uploaded in a single call and bound with dynamic offsets; the
+  vertex buffer stays resident across frames; and samplers, texture views,
+  pipeline and bind group state are no longer rebuilt for every draw.
+
+## [0.26.0] - 2026-07-20
+
+- Added Canvas 2D drop shadows for fills, strokes and text. New `Canvas` methods
+  `set_shadow_color()`, `set_shadow_blur()` and `set_shadow_offset()`. Shadows
+  cost a per-draw offscreen blur; a transparent shadow color restores the
+  zero-overhead path. Thanks @matthargett
+- Added rounded scissor support. New `Canvas` methods `rounded_scissor()` and
+  `intersect_rounded_scissor()` take a corner radius; intersections that can't
+  be represented exactly fall back to rectangular scissoring. Thanks
+  @matthargett
+- Added a start angle to conic gradients for Canvas conformance. New `Paint`
+  constructors `conic_gradient()`, `conic_gradient_with_angle()` and
+  `conic_gradient_stops_with_angle()`. Previously serialized paints still
+  deserialize, defaulting to the prior no-rotation behavior. Thanks
+  @matthargett
+- Added an `ImageSource::HtmlCanvasElement` variant, letting callers hand over a
+  source already rasterized at the wanted size. This avoids a wgpu panic when
+  enlarging an `HtmlImageElement` for hidpi output. Thanks @yebei199
+- Gradients are dithered to reduce banding. Thanks @matthargett
+- Bumped WGPU renderer to use WGPU 30.x
+- Fixed text layout to preserve the fractional baseline (#281). Thanks
+  @matthargett
+- Fixed scaled-atlas text positioning to use the true scale rather than the
+  quantized one. Thanks @matthargett
+
+## [0.25.1] - 2026-05-29
+
+- Added dashed stroke support. New `Paint` methods `set_line_dash()` /
+  `line_dash()` / `with_line_dash()` and `set_line_dash_offset()` /
+  `line_dash_offset()` / `with_line_dash_offset()`, plus `Path::dashed()` to
+  produce a dashed copy of a path.
+- Render text crisply under uniform-scale transforms: glyphs drawn with a
+  uniform scale combined with a translation are now rasterized into the atlas
+  at the on-screen size (for solid color fills) instead of falling back to
+  path rendering.
+
+## [0.25.0] - 2026-05-13
+
+- Bumped WGPU renderer to use WGPU 29.x. Thanks @matthargett
+
+## [0.24.0] - 2026-05-05
+
+- WGPU: Fixed `HtmlImageElement` upload path.
+- Added external texture support. New `Canvas::create_image_from_external_texture()`
+  for importing platform-specific external textures (e.g. EGL/OES external
+  textures in OpenGL, external texture views in WGPU).
+
+## [0.23.2] - 2026-04-13
+
+- Fall back to path rendering for glyphs under non-translation transforms.
+
+## [0.23.1] - 2026-03-31
+
+- Fix variable font glyph caching returning wrong variation instance when
+  using swash. Stale normalized coordinates in swash's ScaleContext could
+  cause glyphs from a previous variation (e.g. bold) to appear for
+  subsequent default-instance renders.
+
+## [0.23.0] - 2026-03-30
+
+- Added variable font support. New methods on `Paint`: `set_font_weight()`,
+  `set_font_italic()`, `set_font_slant()`, and generic `set_font_variation()`
+  with corresponding getters, `with_` builders, and `clear_` methods.
+- Added named font weight constants on `Paint` (`FONT_WEIGHT_THIN` through
+  `FONT_WEIGHT_BLACK`).
+- Added `Canvas::font_variation_axes()` to query available variation axes
+  for variable fonts, and new `VariationAxisInfo` public type.
+- **Breaking:** `Canvas::fill_glyph_run()` and `Canvas::stroke_glyph_run()`
+  now take an additional `normalized_coords: &[i16]` parameter for variable
+  font axis positions. Pass `&[]` for default behavior.
+- Replaced bundled Roboto with Roboto Flex for examples and added slant
+  support with italic fallback.
+
+## [0.22.0] - 2026-03-26
+
+- WGPU: Changed API from `flush_to_surface()` to `flush_to_output()` and
+  accept a type that can be converted to a new WGPURenderOutput struct,
+  making it possible to render into texture views.
+- WGPU: Simplified CommandBuffer to be an Option<>, so that it can be
+  passed to queue's `submit()` without additional wrapping.
+
+## [0.21.0] - 2026-03-23
+
+- Re-release 0.20.5 as 0.21 as the glow dependency upgrade is a public
+  dependency that came with a new major version.
+
+## [0.20.5] - 2026-03-23
+
+- Fix text rendering with wgpu and mesa versions that have difficulties
+  with pipeline override constants.
+- Make the ttf-parser dependency optional.
+
+## [0.20.4] - 2026-02-23
+
+- Fix occasional fringes around swash rendered glyphs caused by uninitialized
+  padding.
+- Ported examples to latest winit/glutin/parley/cosmic-text versions.
+
+## [0.20.3] - 2026-02-18
+
+- Upgraded swash to the latest version.
+
+## [0.20.2] - 2026-02-18
+
+- Added `swash` feature to enable rasterization of glyphs with swash instead of
+  the built-in path renderer.
+
+## [0.20.1] - 2026-01-15
+
+- Lowered MSRV requirement as it's only opt-in via wgpu feature.
+
+## [0.20.0] - 2026-01-14
+
+- Bumped wgpu dependency to wgpu-28
+- Bumped MSRV to 1.92
+
+## [0.19.3] - 2025-10-13
+
+- Fix regression in text rendering performance.
+
+## [0.19.2] - 2025-10-10
+
+- Fix erroneous glyph position regression of commit a1e215782a60df7e4fde9271fe7f95c134ac832f
+  that accidentally subtracted bearing.
+
+## [0.19.1] - 2025-10-08
+
+- Fix docs.rs build
+
+## [0.19.0] - 2025-10-07
+
+- Bump MSRV to 1.88.
+- breaking: Upgraded WGPU renderer to use WGPU 27.x.
+- breaking: Make text layout an optional feature
+
+## [0.18.1] - 2025-09-25
+
+- Fix regression causing panic when rendering text.
+
+## [0.18.0] - 2025-09-25
+
+- Added API to drawing runs of glyphs from the same font.
+
+## [0.17.0] - 2025-09-05
+
+- Bump MSRV to 1.85.
+- Added support for conical gradients.
+
+## [0.16.0] - 2025-08-03
+
+ - Bumped WGPU renderer to use WGPU 26.x.
+
+## [0.15.0] - 2025-07-03
+
+ - Bumped WGPU renderer to use WGPU 25.x.
+
+## [0.14.1] - 2025-06-14
+
+ - Fixed accidental rendering of newline (and other control characters) when using the Inter font. (#236) (thanks @peterprototypes)
+ - WGPU renderer: Fixed panic when rendering empty scenes.
+
+## [0.14.0] - 2025-03-24
+
+- Bump MSRV to 1.84.
+- Fixed WGPU web rendering (thanks @JoshBurbidge)
+
+## [0.13.0] - 2025-01-29
+
+ - Bump MSRV to 1.81.
+ - Bump wgpu to 0.24.
+ - **breaking**: The WGPU renderer is now constructed with a wgpu Device/Queue
+   ithat's not wrapped in an Arc anymore. These types implement clone themselves.
+
+## [0.12.0] - 2025-01-14
+
+ - WGPU renderer: Changed `flush_to_surface()` API to return a command buffer,
+   to let the application decide when to submit.
+ - Bumped glow dependency.
+
+## [0.11.3] - 2024-12-26
+
+ - WGPU renderer: Fix crash when rendering without always calling `set_size()`. (#226)
+
+## [0.11.1] - 2024-11-17
+
+ - No code changes, just a release for docs.rs.
+
+## [0.11.0] - 2024-11-17
+
+ - Added WGPU renderer, behind `wgpu` feature flag.
+ - Fixed rendering of glyphs with overlaps (#183). Thanks to Richard Hozák.
+ - Bumped MSRV to 1.76.
+
+## [0.10.1] - 2024-10-24
+
+ - Fix accidental breakage with scissor clipping.
+
+## [0.10.0] - 2024-10-23
+
+- **breaking**: Removed the mutable reference of self in `new` constructor for Transform2D
+ - Implemented arithmetic operations for `Transform2D`
+ - Completed and improved documentation
+- **breaking**: Removed methods `multipy` from `Transform2D`, since arithmetic operations are defined for `Transform2D` now.
+- **breaking**: Renamed `Transform2D` methods `inversed` to `inverse` and `inverse` to `invert`.
+- **breaking**: Renamed `Transform2D` constructor `new_translation` to `translation` and added new constructors `rotation` and `scaling`.
+- Reimplemented `Transform2D` transformation functions (`translate`, `rotate`, `scale`, `skew_x`, `skew_y`) to do what they are supposed to.
+- **breaking**: glow dependency bumped.
+
+## [0.9.2] - 2024-06-27
+
+ - Fix path rendering where the default path solidity would interfere with the path's
+   own winding direction (https://github.com/femtovg/femtovg/issues/124)
+ - Fix blurry text rendering when drawing on non-integer coordinates
+ - Bumped MSRV to 1.68.
+
+## [0.9.1] - 2024-04-12
+
+ - Fixed inability to introspect `Path` verbs by making `PathIter` and `Verb` public.
+ - Fixed rendering of text strokes with large font sizes.
+
+## [0.9.0] - 2024-02-27
+
+ - **breaking**: Removed pub key field in ImageId. This accidentally
+   exposed the implementation detail of the image store (generational-arena),
+   which has been replaced with slotmap.
+ - For WASM builds, require WebGL 2. This is supported by all major browsers
+   and needed to make `ImageFlags::REPEAT_X/Y` work.
+ - Bumped MSRV to 1.66.
+
+## [0.8.2] - 2024-01-20
+
+ - Improved performance when rendering large texts.
+ - Replace error logging to stderr with use of log crate.
+
+## [0.8.1] - 2023-12-18
+
+ - Fix documentation build on docs.rs.
+
+## [0.8.0] - 2023-11-02
+
+ - Re-release 0.7.2 with major version bump. 0.7.2 was yanked because
+   glow is a re-exported public dependency, that was bumped.
+
+## [0.7.2] - 2023-11-02
+
+ - Bump internal dependencies.
+
+## [0.7.1] - 2023-06-14
+
+- Fix performance regression when drawing unclipped image path fills.
+
+## [0.7.0] - 2023-05-26
+
+### Changed
+
+ - Path drawing functions now take a `&Path` instead of a `&mut Path` and use interior mutability
+   for caching.
+
+## [0.6.0] - 2023-02-06
+
+### Changed
+
+ - Changed `linear_gradient_stops` and `radial_gradient_stops` to take an `IntoIterator`
+   instead of a slice slice for the color stops.
+
+## [0.5.0] - 2023-02-06
+
+### Added
+
+ - added a new `Size` struct, having a `width` and a `height`.
+ - added `size` function to `Image` type, which returns both, `width` and `height` as a `Size`
+
+### Changed
+
+ - Renamed `draw_glyph_cmds` to `draw_glyph_commands`.
+ - Renamed `DrawCmd` to `DrawCommand`.
+ - `set_transform` takes a value of type `Transform2D` now instead of a parameter list.
+ - `dimensions` of `ImageSource` returns a new `Size` type now.
+
+## [0.4.0] - 2023-01-27
+
+### Added
+
+ - `OpenGl::new_from_function_cstr` to create the renderer from a GL loading function that
+   takes an `&std::ffi::CStr`.
+
+### Fixed
+
+ - Fixed erroneously multiply applied global alpha when mixing color glyphs with regular glyphs.
+
+### Changed
+
+ - MRSV was bumped to Rust 1.63, the crate now uses Rust Edition 2021.
+ - `new_from_glutin_context` can now be used with headless contexts.
+ - All const-safe `Color` constructors are now const.
+ - `Canvas`'s text layout methods no longer require a mutable reference.
+ - Removed the copy trait from `Paint` to avoid accidental copies.
+ - `Paint` is always supplied by reference now.
+ - `TextContext`'s `resize_shaping_run_cache` and `resize_shaped_words_cache` functions now take a
+   `std::num::NonZeroUsize` for the capacity value.
+ - As part of the glutin update, `OpenGL::new_from_glutin_context` was renamed to `new_from_glutin_display` and takes a glutin display now.
+ - Removed `glutin` from the default features.
+
+## [0.3.7] - 2022-10-24
+
+### Fixed
+
+ - Fix build with latest rustybuzz release after 0.5.2 breakage. 0.5.3 doesn't
+   re-export the ttf_parser module anymore.
+
+## [0.3.6] - 2022-10-23
+
+### Fixed
+
+ - Fix build with latest rustybuzz release.
+
+## [0.3.5] - 2022-05-23
+
+### Changed
+
+ - Optimized the OpenGL renderer to perform better on older GPUs by splitting the large fragment shader
+   into smaller programs.
+
+## [0.3.4] - 2022-04-07
+
+### Added
+
+ - Added support for importing backend-specific textures into the rendering of a scene with `Canvas::create_image_from_native_texture`.
+ - Added functions to `TextContext` to configure the text shaping caches: `resize_shaping_run_cache` and `resize_shaped_words_cache`.
+
+### Changed
+
+ - Added optimized rendering code path for the common case of filling a rectangular path with an image and anti-aliasing
+   on the paint disabled.
+
+### Fixed
+
+ - Fixed line breaking to permit a break in the middle of a word if it is the first word in the paragraph
+   and it doesn't fit otherwise.
+
+## [0.3.3] - 2022-02-21
+
+### Changed
+
+ - Bumped rustybuzz and ttf-parser dependencies.
+
+## [0.3.2] - 2022-02-09
+
+### Fixed
+
+ - Correctly detect when WebGL is disabled in a web browser in the `renderer::OpenGL::new_from_html_canvas` function.
+
+## [0.3.1] - 2022-02-08
+
+### Fixed
+
+ - Don't require default features of glutin. We don't need any and this way other users of glutin
+   have the ability to opt out.
+
+## [0.3.0] - 2022-02-04
+
+### Changed
+
+ - **Breaking:** The dependency to the `image` crate was bumped from `0.23` to `0.24`.
+   Since the types of this crate are used in public femtovg API, users need to upgrade
+   their dependency to the `image` crate as well.
+ - **Breaking**: Removed deprecated `renderer::OpenGL::new` function. Use `renderer::OpenGl::new_from_function`
+   or `renderer::OpenGl::new_from_glutin_context`.
+
+### Added
+
+ - Use `Paint::image_tint` to create an image paint that not only applies an alpha but an entire color (tint).
+
+### Fixed
+
+ - Improved performance of `fill_path` and `stroke_path`
+
+[0.3.0]: https://github.com/femtovg/femtovg/releases/tag/v0.3.0
+[0.3.1]: https://github.com/femtovg/femtovg/releases/tag/v0.3.1
+[0.3.2]: https://github.com/femtovg/femtovg/releases/tag/v0.3.2
+[0.3.3]: https://github.com/femtovg/femtovg/releases/tag/v0.3.3
+[0.3.4]: https://github.com/femtovg/femtovg/releases/tag/v0.3.4
+[0.3.5]: https://github.com/femtovg/femtovg/releases/tag/v0.3.5
+[0.3.6]: https://github.com/femtovg/femtovg/releases/tag/v0.3.6
+[0.3.7]: https://github.com/femtovg/femtovg/releases/tag/v0.3.7
+[0.4.0]: https://github.com/femtovg/femtovg/releases/tag/v0.4.0
+[0.5.0]: https://github.com/femtovg/femtovg/releases/tag/v0.5.0
+[0.6.0]: https://github.com/femtovg/femtovg/releases/tag/v0.6.0
+[0.7.0]: https://github.com/femtovg/femtovg/releases/tag/v0.7.0
+[0.7.1]: https://github.com/femtovg/femtovg/releases/tag/v0.7.1
+[0.7.2]: https://github.com/femtovg/femtovg/releases/tag/v0.7.2
+[0.8.0]: https://github.com/femtovg/femtovg/releases/tag/v0.8.0
+[0.8.1]: https://github.com/femtovg/femtovg/releases/tag/v0.8.1
+[0.8.2]: https://github.com/femtovg/femtovg/releases/tag/v0.8.2
+[0.9.0]: https://github.com/femtovg/femtovg/releases/tag/v0.9.0
+[0.9.1]: https://github.com/femtovg/femtovg/releases/tag/v0.9.1
+[0.9.2]: https://github.com/femtovg/femtovg/releases/tag/v0.9.2
+[0.10.0]: https://github.com/femtovg/femtovg/releases/tag/v0.10.0
+[0.10.1]: https://github.com/femtovg/femtovg/releases/tag/v0.10.1
+[0.11.0]: https://github.com/femtovg/femtovg/releases/tag/v0.11.0
+[0.11.1]: https://github.com/femtovg/femtovg/releases/tag/v0.11.1
+[0.11.3]: https://github.com/femtovg/femtovg/releases/tag/v0.11.3
+[0.12.0]: https://github.com/femtovg/femtovg/releases/tag/v0.12.0
+[0.13.0]: https://github.com/femtovg/femtovg/releases/tag/v0.13.0
+[0.14.0]: https://github.com/femtovg/femtovg/releases/tag/v0.14.0
+[0.14.1]: https://github.com/femtovg/femtovg/releases/tag/v0.14.1
+[0.15.0]: https://github.com/femtovg/femtovg/releases/tag/v0.15.0
+[0.16.0]: https://github.com/femtovg/femtovg/releases/tag/v0.16.0
+[0.17.0]: https://github.com/femtovg/femtovg/releases/tag/v0.17.0
+[0.18.0]: https://github.com/femtovg/femtovg/releases/tag/v0.18.0
+[0.18.1]: https://github.com/femtovg/femtovg/releases/tag/v0.18.1
+[0.19.0]: https://github.com/femtovg/femtovg/releases/tag/v0.19.0
+[0.19.1]: https://github.com/femtovg/femtovg/releases/tag/v0.19.1
+[0.19.2]: https://github.com/femtovg/femtovg/releases/tag/v0.19.2
+[0.19.3]: https://github.com/femtovg/femtovg/releases/tag/v0.19.3
+[0.20.0]: https://github.com/femtovg/femtovg/releases/tag/v0.20.0
+[0.20.1]: https://github.com/femtovg/femtovg/releases/tag/v0.20.1
+[0.20.2]: https://github.com/femtovg/femtovg/releases/tag/v0.20.2
+[0.20.3]: https://github.com/femtovg/femtovg/releases/tag/v0.20.3
+[0.20.4]: https://github.com/femtovg/femtovg/releases/tag/v0.20.4
+[0.20.5]: https://github.com/femtovg/femtovg/releases/tag/v0.20.5
+[0.21.0]: https://github.com/femtovg/femtovg/releases/tag/v0.21.0
+[0.22.0]: https://github.com/femtovg/femtovg/releases/tag/v0.22.0
+[0.23.0]: https://github.com/femtovg/femtovg/releases/tag/v0.23.0
+[0.23.1]: https://github.com/femtovg/femtovg/releases/tag/v0.23.1
+[0.23.2]: https://github.com/femtovg/femtovg/releases/tag/v0.23.2
+[0.24.0]: https://github.com/femtovg/femtovg/releases/tag/v0.24.0
+[0.25.0]: https://github.com/femtovg/femtovg/releases/tag/v0.25.0
+[0.25.1]: https://github.com/femtovg/femtovg/releases/tag/v0.25.1
+[0.26.0]: https://github.com/femtovg/femtovg/releases/tag/v0.26.0
+[0.27.0]: https://github.com/femtovg/femtovg/releases/tag/v0.27.0
