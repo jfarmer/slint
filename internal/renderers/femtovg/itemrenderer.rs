@@ -206,7 +206,7 @@ fn blur_and_colorize<R: femtovg::Renderer + TextureImporter>(
 ) -> Option<Rc<Texture<R>>> {
     let shadow_image = if shadow_options.blur.get() > 0. {
         let blurred_image = shadow_image
-            .filter(femtovg::ImageFilter::GaussianBlur { sigma: shadow_options.blur_sigma() });
+            .filter(femtovg::ImageFilter::gaussian_blur(shadow_options.blur_sigma()));
         textures_to_delete_after_flush.borrow_mut().push(shadow_image);
         blurred_image
     } else {
