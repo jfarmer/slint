@@ -1331,7 +1331,11 @@ fn get_document_symbols(
                 Some(DocumentSymbol {
                     name: id.text().into(),
                     kind,
-                    range: util::node_to_lsp_range(&member, format),
+                    range: util::text_range_to_lsp_range(
+                        &member.source_file,
+                        util::node_range_without_trailing_ws(&member),
+                        format,
+                    ),
                     selection_range: util::token_to_lsp_range(&id, format),
                     ..ds.clone()
                 })
@@ -2327,7 +2331,7 @@ export component App {
             );
             let fields = symbols[0].children.as_ref().unwrap();
             check(&fields[0], "first", K::FIELD, "first: int,");
-            check(&fields[1], "second", K::FIELD, "second: string ");
+            check(&fields[1], "second", K::FIELD, "second: string");
             let variants = symbols[1].children.as_ref().unwrap();
             check(&variants[0], "left", K::ENUM_MEMBER, "left");
             check(&variants[1], "right", K::ENUM_MEMBER, "right");
