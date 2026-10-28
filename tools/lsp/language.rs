@@ -1204,7 +1204,7 @@ fn get_document_symbols(
             }
 
             Some(DocumentSymbol {
-                range: util::node_to_lsp_range(&component_node, document_cache.format),
+                range: declaration_range(&component_node, document_cache.format),
                 selection_range,
                 name: c.id.to_string(),
                 kind: if c.is_global() {
@@ -1225,13 +1225,14 @@ fn get_document_symbols(
                 .and_then(|n| crate::editor_preview::token_info::node_for_decl(document_cache, n))
                 .and_then(|node| {
                     Some(DocumentSymbol {
-                        range: util::node_to_lsp_range(&node, document_cache.format),
+                        range: declaration_range(&node, document_cache.format),
                         selection_range: util::node_to_lsp_range(
                             &node.child_node(SyntaxKind::DeclaredIdentifier)?,
                             document_cache.format,
                         ),
                         name: s.name.slint_name().unwrap().to_string(),
                         kind: lsp_types::SymbolKind::STRUCT,
+                        children: type_children(&node, &ds, document_cache.format),
                         ..ds.clone()
                     })
                 }),
@@ -1242,13 +1243,14 @@ fn get_document_symbols(
                 .map(|node| {
                     let node = i_slint_compiler::parser::syntax_nodes::EnumDeclaration::from(node);
                     DocumentSymbol {
-                        range: util::node_to_lsp_range(&node, document_cache.format),
+                        range: declaration_range(&node, document_cache.format),
                         selection_range: util::node_to_lsp_range(
                             &node.DeclaredIdentifier(),
                             document_cache.format,
                         ),
                         name: enumeration.name.to_string(),
                         kind: lsp_types::SymbolKind::ENUM,
+                        children: type_children(&node, &ds, document_cache.format),
                         ..ds.clone()
                     }
                 }),
@@ -1256,34 +1258,95 @@ fn get_document_symbols(
         }
     }));
 
+    fn declaration_range(
+        node: &SyntaxNode,
+        format: editor_preview::ByteFormat,
+    ) -> lsp_types::Range {
+        let node = node
+            .parent()
+            .filter(|p| p.kind() == SyntaxKind::ExportsList)
+            .unwrap_or_else(|| node.clone());
+        util::node_to_lsp_range(&node, format)
+    }
+
+    fn type_children(
+        node: &SyntaxNode,
+        ds: &DocumentSymbol,
+        format: editor_preview::ByteFormat,
+    ) -> Option<Vec<DocumentSymbol>> {
+        let members = node.child_node(SyntaxKind::ObjectType).unwrap_or_else(|| node.clone());
+        let children: Vec<_> = members
+            .children()
+            .filter_map(|member| {
+                let kind = match member.kind() {
+                    SyntaxKind::ObjectTypeMember => lsp_types::SymbolKind::FIELD,
+                    SyntaxKind::EnumValue => lsp_types::SymbolKind::ENUM_MEMBER,
+                    _ => return None,
+                };
+                let id = member.child_token(SyntaxKind::Identifier)?;
+                Some(DocumentSymbol {
+                    name: id.text().into(),
+                    kind,
+                    range: util::node_to_lsp_range(&member, format),
+                    selection_range: util::token_to_lsp_range(&id, format),
+                    ..ds.clone()
+                })
+            })
+            .collect();
+        (!children.is_empty()).then_some(children)
+    }
+
     fn gen_children(
         elem: &ElementRc,
         ds: &DocumentSymbol,
         format: editor_preview::ByteFormat,
     ) -> Option<Vec<DocumentSymbol>> {
-        let r = elem
-            .borrow()
-            .children
-            .iter()
-            .filter_map(|child| {
-                let e = child.borrow();
-                let element_node = &e.debug.first()?.node;
-                let sub_element_node = element_node.parent()?;
-                debug_assert_eq!(sub_element_node.kind(), SyntaxKind::SubElement);
+        let element = elem.borrow();
+        let mut r: Vec<_> = element
+            .debug
+            .first()?
+            .node
+            .children()
+            .filter_map(|node| {
+                let kind = match node.kind() {
+                    SyntaxKind::PropertyDeclaration => lsp_types::SymbolKind::PROPERTY,
+                    SyntaxKind::CallbackDeclaration => lsp_types::SymbolKind::EVENT,
+                    SyntaxKind::Function => lsp_types::SymbolKind::FUNCTION,
+                    _ => return None,
+                };
+                let id = node.child_node(SyntaxKind::DeclaredIdentifier)?;
+                let name = id.child_token(SyntaxKind::Identifier)?.text().to_string();
                 Some(DocumentSymbol {
-                    range: util::node_to_lsp_range(&sub_element_node, format),
-                    selection_range: util::node_to_lsp_range(
-                        element_node.QualifiedName().as_ref()?,
-                        format,
-                    ),
-                    name: e.base_type.to_string(),
-                    detail: (!e.id.is_empty()).then(|| e.id.to_string()),
-                    kind: lsp_types::SymbolKind::VARIABLE,
-                    children: gen_children(child, ds, format),
+                    name,
+                    kind,
+                    range: util::node_to_lsp_range(&node, format),
+                    selection_range: util::node_to_lsp_range(&id, format),
                     ..ds.clone()
                 })
             })
-            .collect::<Vec<_>>();
+            .collect();
+        r.extend(element.children.iter().filter_map(|child| {
+            let e = child.borrow();
+            let element_node = &e.debug.first()?.node;
+            let sub_element_node = element_node.parent()?;
+            debug_assert_eq!(sub_element_node.kind(), SyntaxKind::SubElement);
+            let id = sub_element_node.child_token(SyntaxKind::Identifier);
+            let selection_range = if let Some(id) = &id {
+                util::token_to_lsp_range(id, format)
+            } else {
+                util::node_to_lsp_range(element_node.QualifiedName().as_ref()?, format)
+            };
+            Some(DocumentSymbol {
+                range: util::node_to_lsp_range(&sub_element_node, format),
+                selection_range,
+                name: id.as_ref().map_or_else(|| e.base_type.to_string(), |id| id.text().into()),
+                detail: id.map(|_| e.base_type.to_string()),
+                kind: lsp_types::SymbolKind::VARIABLE,
+                children: gen_children(child, ds, format),
+                ..ds.clone()
+            })
+        }));
+        r.sort_by_key(|symbol| symbol.range.start);
         (!r.is_empty()).then_some(r)
     }
 
@@ -2143,12 +2206,12 @@ enum {}
         check_start_with(result[2].selection_range.start, "Str {");
         check_start_with(result[2].selection_range.end, " {");
         assert_eq!(result[3].name, "SomeGlobal");
-        check_start_with(result[3].range.start, "global SomeGlobal");
+        check_start_with(result[3].range.start, "export global SomeGlobal");
         check_start_with(result[3].range.end, "/*SomeGlobal*/");
         check_start_with(result[3].selection_range.start, "SomeGlobal {");
         check_start_with(result[3].selection_range.end, " {");
         assert_eq!(result[4].name, "TestWindow");
-        check_start_with(result[4].range.start, "component TestWindow inherits Window {");
+        check_start_with(result[4].range.start, "export component TestWindow inherits Window {");
         check_start_with(result[4].range.end, "/*TestWindow*/");
         check_start_with(result[4].selection_range.start, "TestWindow inherits");
         check_start_with(result[4].selection_range.end, " inherits");
@@ -2158,16 +2221,105 @@ enum {}
                     result[$root] $(.children.as_ref().unwrap()[$more])*
                 };
             }
-        assert_eq!(tree!(1 0).name, "HorizontalLayout");
-        check_start_with(tree!(1 0).range.start, "HorizontalLayout {");
-        check_start_with(tree!(1 0).range.end, "/*HorizontalLayout*/");
-        assert_eq!(tree!(1 0 0).name, "Button");
-        assert_eq!(tree!(1 0 0).detail, Some("btn".into()));
-        check_start_with(tree!(1 0 0).range.start, "btn := Button");
+        assert_eq!(tree!(1 1).name, "HorizontalLayout");
+        check_start_with(tree!(1 1).range.start, "HorizontalLayout {");
+        check_start_with(tree!(1 1).range.end, "/*HorizontalLayout*/");
+        assert_eq!(tree!(1 1 0).name, "btn");
+        assert_eq!(tree!(1 1 0).detail, Some("Button".into()));
+        check_start_with(tree!(1 1 0).range.start, "btn := Button");
 
-        assert_eq!(tree!(1 0 1 0).name, "TouchArea");
-        assert_eq!(tree!(1 0 1 0).detail, Some("ta".into()));
-        check_start_with(tree!(1 0 1 0).range.start, "ta := TouchArea");
+        assert_eq!(tree!(1 1 1 0).name, "ta");
+        assert_eq!(tree!(1 1 1 0).detail, Some("TouchArea".into()));
+        check_start_with(tree!(1 1 1 0).range.start, "ta := TouchArea");
+    }
+
+    #[test]
+    fn test_document_symbols_members() {
+        let source = r#"export struct Data { first: int, second: string }
+export enum Direction { left, right }
+export global Settings {
+    in-out property <int> count;
+    pure callback changed(int);
+    public pure function twice(value: int) -> int { return value * 2; }
+}
+export component App {
+    @deprecated("Use count") in-out property <int> old-count: 1;
+    private property <int> count <=> Settings.count;
+    callback changed <=> Settings.changed;
+    public function run() { changed(count); }
+    /* 😀 */ child_id := Rectangle {
+        in property <int> count: 2;
+        callback changed;
+        function run() {}
+    }
+}"#;
+        let (mut dc, uri, _) = loaded_document_cache(source.into());
+        for format in [editor_preview::ByteFormat::Utf8, editor_preview::ByteFormat::Utf16] {
+            dc.format = format;
+            let DocumentSymbolResponse::Nested(symbols) = get_document_symbols(
+                &mut dc,
+                &lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            )
+            .unwrap() else {
+                panic!("expected nested symbols")
+            };
+            let text = |range: lsp_types::Range| {
+                let (_, start) = dc.get_document_and_offset(&uri, &range.start).unwrap();
+                let (_, end) = dc.get_document_and_offset(&uri, &range.end).unwrap();
+                &source[usize::from(start)..usize::from(end)]
+            };
+            let check = |symbol: &DocumentSymbol, name, kind, declaration| {
+                assert_eq!(symbol.name, name);
+                assert_eq!(symbol.kind, kind);
+                assert_eq!(text(symbol.selection_range), name);
+                assert_eq!(text(symbol.range), declaration);
+            };
+            use lsp_types::SymbolKind as K;
+            check(
+                &symbols[0],
+                "Data",
+                K::STRUCT,
+                "export struct Data { first: int, second: string }",
+            );
+            let fields = symbols[0].children.as_ref().unwrap();
+            check(&fields[0], "first", K::FIELD, "first: int,");
+            check(&fields[1], "second", K::FIELD, "second: string ");
+            let variants = symbols[1].children.as_ref().unwrap();
+            check(&variants[0], "left", K::ENUM_MEMBER, "left");
+            check(&variants[1], "right", K::ENUM_MEMBER, "right");
+            let global = symbols[2].children.as_ref().unwrap();
+            check(&global[0], "count", K::PROPERTY, "in-out property <int> count;");
+            check(&global[1], "changed", K::EVENT, "pure callback changed(int);");
+            check(
+                &global[2],
+                "twice",
+                K::FUNCTION,
+                "public pure function twice(value: int) -> int { return value * 2; }",
+            );
+            let app = symbols[3].children.as_ref().unwrap();
+            check(
+                &app[0],
+                "old-count",
+                K::PROPERTY,
+                "@deprecated(\"Use count\") in-out property <int> old-count: 1;",
+            );
+            check(
+                &app[1],
+                "count",
+                K::PROPERTY,
+                "private property <int> count <=> Settings.count;",
+            );
+            check(&app[2], "changed", K::EVENT, "callback changed <=> Settings.changed;");
+            check(&app[3], "run", K::FUNCTION, "public function run() { changed(count); }");
+            assert_eq!(text(app[4].selection_range), "child_id");
+            assert_eq!(app[4].name, "child_id");
+            assert_eq!(app[4].detail.as_deref(), Some("Rectangle"));
+            assert!(text(app[4].range).starts_with("child_id := Rectangle {"));
+            let child = app[4].children.as_ref().unwrap();
+            check(&child[0], "count", K::PROPERTY, "in property <int> count: 2;");
+            check(&child[1], "changed", K::EVENT, "callback changed;");
+            check(&child[2], "run", K::FUNCTION, "function run() {}");
+        }
     }
 
     #[test]
@@ -2187,14 +2339,14 @@ enum {}
             assert_eq!(result[0].selection_range, mk_range(10..13));
             let children = result[0].children.as_ref().unwrap();
             assert_eq!(children.len(), 2);
-            assert_eq!(children[0].name, "<error>");
+            assert_eq!(children[0].name, "xxx");
             assert_eq!(children[0].range, mk_range(16..25));
-            assert_eq!(children[0].detail, Some("xxx".into()));
-            assert_eq!(children[0].selection_range, mk_range(23..23));
-            assert_eq!(children[1].name, "<error>");
+            assert_eq!(children[0].detail, Some("<error>".into()));
+            assert_eq!(children[0].selection_range, mk_range(16..19));
+            assert_eq!(children[1].name, "yyy");
             assert_eq!(children[1].range, mk_range(33..40));
-            assert_eq!(children[1].detail, Some("yyy".into()));
-            assert_eq!(children[1].selection_range, mk_range(40..40));
+            assert_eq!(children[1].detail, Some("<error>".into()));
+            assert_eq!(children[1].selection_range, mk_range(33..36));
         } else {
             unreachable!();
         }
