@@ -4,10 +4,8 @@
 //! Messages the language server sends to its editor client.
 
 use i_slint_editor_preview::VersionedDiagnostics;
-#[cfg(any(feature = "preview-external", feature = "preview-engine"))]
 use i_slint_live_preview::protocol::SourceFileVersion;
 
-#[cfg(any(feature = "preview-external", feature = "preview-engine"))]
 pub fn notify_lsp_diagnostics(
     sender: &crate::ServerNotifier,
     uri: lsp_types::Url,
@@ -57,15 +55,42 @@ pub async fn send_show_document_to_editor(
 }
 
 /// Publish the diagnostics returned by the document lifecycle functions to the LSP client.
-///
-/// Does nothing unless the `preview-engine` feature is enabled.
-#[cfg_attr(not(feature = "preview-engine"), allow(unused_variables))]
 pub fn publish_diagnostics(
     server_notifier: &crate::ServerNotifier,
     diagnostics: VersionedDiagnostics,
 ) {
-    #[cfg(feature = "preview-engine")]
     for (uri, version, diagnostics) in diagnostics {
         let _ = notify_lsp_diagnostics(server_notifier, uri, version, diagnostics);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    #[test]
+    fn standard_diagnostics_are_published_without_preview() {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        let notifier = crate::ServerNotifier::new(sender, Default::default());
+        let uri = lsp_types::Url::parse("file:///test.slint").unwrap();
+        let diagnostic = lsp_types::Diagnostic::new_simple(Default::default(), "error".into());
+        super::publish_diagnostics(
+            &notifier,
+            vec![
+                (uri.clone(), Some(1), vec![diagnostic.clone()]),
+                (uri.clone(), Some(2), Vec::new()),
+            ],
+        );
+        for (version, diagnostics) in [(1, vec![diagnostic]), (2, Vec::new())] {
+            let lsp_server::Message::Notification(notification) =
+                receiver.try_recv().expect("diagnostics were not published")
+            else {
+                panic!("expected diagnostic notification")
+            };
+            assert_eq!(notification.method, "textDocument/publishDiagnostics");
+            let params: lsp_types::PublishDiagnosticsParams =
+                serde_json::from_value(notification.params).unwrap();
+            assert_eq!(params.uri, uri);
+            assert_eq!(params.version, Some(version));
+            assert_eq!(params.diagnostics, diagnostics);
+        }
     }
 }
