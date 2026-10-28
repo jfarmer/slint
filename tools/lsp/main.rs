@@ -540,6 +540,7 @@ async fn run_main_loop(
     let mut watch_paths_revision = None;
     sync_file_watcher_if_needed(&mut file_watcher, &ctx, &mut watch_paths_revision)?;
 
+    let mut last_watcher_sync = std::time::Instant::now();
     loop {
         let recompile_idle_timeout = if ctx.session.pending_recompile.is_empty() {
             Duration::MAX
@@ -609,7 +610,11 @@ async fn run_main_loop(
         if let Err(error) = language::sync_preview_project_root(&mut ctx.session) {
             tracing::warn!("Failed to sync preview project root: {error}");
         }
-        sync_file_watcher_if_needed(&mut file_watcher, &ctx, &mut watch_paths_revision)?;
+        if from_lsp_receiver.is_empty() || last_watcher_sync.elapsed() >= Duration::from_millis(10)
+        {
+            sync_file_watcher_if_needed(&mut file_watcher, &ctx, &mut watch_paths_revision)?;
+            last_watcher_sync = std::time::Instant::now();
+        }
     }
 }
 
