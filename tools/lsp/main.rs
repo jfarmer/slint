@@ -137,9 +137,9 @@ struct LivePreview {
 }
 
 impl RequestHandler {
-    fn handle_request(&self, request: lsp_server::Request, ctx: &mut Context) -> Result<()> {
+    async fn handle_request(&self, request: lsp_server::Request, ctx: &mut Context) -> Result<()> {
         if let Some(x) = self.0.get(&request.method.as_str()) {
-            match x(request.params, ctx) {
+            match x(request.params, ctx).await {
                 Ok(r) => {
                     ctx.server_notifier
                         .send_message(Message::Response(Response::new_ok(request.id, r)))?;
@@ -650,7 +650,7 @@ async fn handle_lsp_message(
             if connection.handle_shutdown(&req).unwrap_or(false) {
                 return Ok(true);
             }
-            rh.handle_request(req, ctx)?;
+            rh.handle_request(req, ctx).await?;
         }
         Message::Response(_) => {
             // should not be receiving responses, since they're handled in the dedicated thread

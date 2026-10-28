@@ -32,7 +32,7 @@ use wasm_bindgen::prelude::*;
 type JsResult<T> = std::result::Result<T, JsError>;
 
 impl RequestHandler {
-    fn handle_request(
+    async fn handle_request(
         &self,
         method: String,
         params: JsValue,
@@ -41,7 +41,7 @@ impl RequestHandler {
         if let Some(f) = self.0.get(&method.as_str()) {
             let param = serde_wasm_bindgen::from_value(params)
                 .map_err(|x| format!("invalid param to handle_request: {x:?}"))?;
-            let r = f(param, ctx).map_err(|e| e.message)?;
+            let r = f(param, ctx).await.map_err(|e| e.message)?;
             to_value(&r).map_err(|e| e.to_string().into())
         } else {
             Err("Cannot handle request".into())
@@ -443,6 +443,7 @@ impl SlintServer {
         let result = self
             .rh
             .handle_request(method, params, &mut ctx)
+            .await
             .map_err(|e| JsError::new(&e.to_string()))?;
         Ok(result)
     }

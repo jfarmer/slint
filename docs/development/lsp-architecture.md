@@ -13,6 +13,7 @@ The Slint LSP (Language Server Protocol) server provides IDE features for `.slin
 - **Code completion** - Property, element, type suggestions
 - **Hover** - Type information and documentation
 - **Go-to-definition** - Navigate to declarations
+- **References** - Find source references across the workspace
 - **Semantic tokens** - Syntax highlighting
 - **Document symbols** - Outline view
 - **Rename** - Refactoring support
@@ -151,6 +152,25 @@ The semantic token types are lookup indices into a legend of `LEGEND_TYPES` and 
 - Type names → Struct/component definition
 - Import paths → Imported file
 - Qualified names → Resolved definition
+
+## References
+
+`textDocument/references` uses the token resolution from go-to-definition and the symbol matching shared with rename.
+It filters candidate identifier spellings before resolving them, including import and export aliases.
+It returns source locations and honors `includeDeclaration` without constructing rename edits.
+
+Before a native server searches, it discovers `.slint` files beneath the initialized workspace folders or root URI.
+It skips `.git`, `target`, and `node_modules` directories and doesn't follow symlinks during discovery.
+Already loaded imports outside those directories remain searchable.
+The server compares unopened files with cached source text, invalidates changed or deleted files and their dependents,
+and loads new files with the existing compiler configuration.
+Open buffers retain their unsaved contents and versions.
+Unchanged documents reuse their syntax and semantic data.
+There is no separate reference index.
+
+The WebAssembly server searches documents supplied by its host and their loaded imports.
+It doesn't enumerate the host's filesystem.
+The current request loop processes requests serially and doesn't cancel reference searches or stream partial results.
 
 ## Rename
 

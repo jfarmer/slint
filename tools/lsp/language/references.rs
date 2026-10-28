@@ -5,6 +5,113 @@ use crate::editor_preview::{DocumentCache, token_info};
 use i_slint_compiler::parser::{SyntaxKind, SyntaxToken};
 use lsp_types::Location;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn load_workspace(ctx: &mut super::Context) {
+    use i_slint_compiler::diagnostics::BuildDiagnostics;
+    use std::collections::{HashMap, HashSet};
+
+    let roots: Vec<_> = crate::host_language_search::resolve_workspace_folders(&ctx.init_param)
+        .into_iter()
+        .filter_map(|folder| folder.uri.to_file_path().ok())
+        .collect();
+    if roots.is_empty() {
+        return;
+    }
+    let dc = &mut ctx.session.document_cache;
+    let cached: HashMap<_, _> = dc
+        .all_url_documents()
+        .filter(|(url, _)| url.scheme() == "file")
+        .map(|(url, node)| (url, node.source_file.source().unwrap_or_default().to_string()))
+        .collect();
+    let open: HashSet<_> = ctx
+        .session
+        .open_urls
+        .iter()
+        .filter_map(|url| i_slint_compiler::source_path::SourcePath::from_url(url).to_url())
+        .collect();
+    let known_paths: Vec<_> = cached
+        .keys()
+        .filter(|url| url.path().ends_with(".slint"))
+        .filter_map(|url| url.to_file_path().ok())
+        .collect();
+    let sources = tokio::task::spawn_blocking(move || {
+        let mut files: HashSet<_> = known_paths.into_iter().collect();
+        let mut directories = roots;
+        let mut visited = HashSet::new();
+        while let Some(directory) = directories.pop() {
+            if !visited.insert(directory.clone()) {
+                continue;
+            }
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::debug!("Cannot scan {}: {error}", directory.display());
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let Ok(kind) = entry.file_type() else { continue };
+                let path = entry.path();
+                if kind.is_dir() {
+                    if !matches!(
+                        entry.file_name().to_str(),
+                        Some(".git" | "target" | "node_modules")
+                    ) {
+                        directories.push(path);
+                    }
+                } else if kind.is_file() && path.extension().is_some_and(|ext| ext == "slint") {
+                    files.insert(path);
+                }
+            }
+        }
+        files
+            .into_iter()
+            .filter_map(|path| {
+                let url = lsp_types::Url::from_file_path(&path).ok()?;
+                if open.contains(&url) {
+                    return None;
+                }
+                match std::fs::read_to_string(&path) {
+                    Ok(source) => Some((url, Some(source))),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((url, None)),
+                    Err(error) => {
+                        tracing::debug!("Cannot read {}: {error}", path.display());
+                        None
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    let sources = match sources {
+        Ok(sources) => sources,
+        Err(error) => {
+            tracing::error!("Workspace reference scan failed: {error}");
+            return;
+        }
+    };
+    for (url, source) in &sources {
+        if source.as_ref() != cached.get(url)
+            && let Err(error) = dc.drop_document(url)
+        {
+            tracing::debug!("Cannot invalidate {url}: {error}");
+        }
+    }
+    for (url, source) in sources {
+        if let Some(source) = source
+            && dc.get_document(&url).is_none()
+        {
+            dc.reload_cached_file(&url, &mut BuildDiagnostics::default()).await;
+            if dc.get_document(&url).is_none() {
+                let _ = dc.load_url(&url, None, source, &mut BuildDiagnostics::default()).await;
+            }
+        }
+    }
+    for url in cached.keys() {
+        dc.reload_cached_file(url, &mut BuildDiagnostics::default()).await;
+    }
+}
+
 pub fn references(
     document_cache: &DocumentCache,
     token: SyntaxToken,
@@ -64,6 +171,167 @@ mod tests {
     use crate::language::test;
     use i_slint_compiler::parser::TextSize;
     use lsp_types::Url;
+
+    async fn request(
+        ctx: &mut super::super::Context,
+        uri: &Url,
+        source: &str,
+        anchor: &str,
+        include: bool,
+    ) -> Vec<Location> {
+        let prefix = &source[..source.find(anchor).unwrap()];
+        let column = prefix.rsplit('\n').next().unwrap();
+        let character = match ctx.session.document_cache.format {
+            crate::editor_preview::ByteFormat::Utf8 => column.len(),
+            crate::editor_preview::ByteFormat::Utf16 => column.encode_utf16().count(),
+        };
+        let position = lsp_types::Position::new(
+            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
+            character as u32,
+        );
+        let mut handlers = crate::language::RequestHandler::default();
+        crate::language::register_request_handlers(&mut handlers);
+        let result = handlers.0["textDocument/references"](
+            serde_json::json!({
+                "textDocument": { "uri": uri }, "position": position,
+                "context": { "includeDeclaration": include }
+            }),
+            ctx,
+        )
+        .await
+        .unwrap();
+        serde_json::from_value(result).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unopened_files_and_unsaved_buffers() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_path = temp.path().join("base.slint");
+        let base = Url::from_file_path(&base_path).unwrap();
+        let disk = "export component Base { in-out property <int> disk-value; }";
+        let editor = "export component Base { in-out property <int> value-name; }";
+        std::fs::write(&base_path, disk).unwrap();
+        let consumer_path = temp.path().join("consumer.slint");
+        let consumer = Url::from_file_path(&consumer_path).unwrap();
+        let consumer_text = "import { Base as Renamed } from \"base.slint\"; component Consumer inherits Renamed { value_name: 1; /* 😀 */ x: root.value-name; }";
+        std::fs::write(&consumer_path, consumer_text).unwrap();
+        std::fs::write(
+            temp.path().join("unrelated.slint"),
+            "component Other { in property <int> value-name; x: value-name; }",
+        )
+        .unwrap();
+        std::fs::write(temp.path().join("broken.slint"), "component Broken { invalid syntax")
+            .unwrap();
+        let mut ctx = test::mock_context();
+        ctx.init_param.workspace_folders = Some(vec![lsp_types::WorkspaceFolder {
+            uri: Url::from_directory_path(temp.path()).unwrap(),
+            name: "test".into(),
+        }]);
+        let encoded_base =
+            Url::parse(&base.as_str().replace("base.slint", "base.%73lint")).unwrap();
+        ctx.session.open_document(editor.into(), encoded_base, Some(7)).await.unwrap();
+        assert!(ctx.session.document_cache.get_document(&consumer).is_none());
+        let hits = request(&mut ctx, &base, editor, "value-name;", true).await;
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits.iter().filter(|l| l.uri == consumer).count(), 2);
+        let revision = ctx.session.document_cache.revision();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", true).await, hits);
+        assert_eq!(ctx.session.document_cache.revision(), revision);
+        assert_eq!(ctx.session.document_cache.document_version(&base), Some(7));
+
+        ctx.session
+            .open_document(
+                consumer_text.replace("root.value-name", "42"),
+                consumer.clone(),
+                Some(8),
+            )
+            .await
+            .unwrap();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", false).await.len(), 1);
+        assert_eq!(std::fs::read_to_string(&base_path).unwrap(), disk);
+        assert_eq!(std::fs::read_to_string(&consumer_path).unwrap(), consumer_text);
+
+        ctx.session.close_document(consumer.clone()).await.unwrap();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", false).await.len(), 2);
+        std::fs::write(&consumer_path, consumer_text.replace("root.value-name", "42")).unwrap();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", false).await.len(), 1);
+        std::fs::remove_file(&consumer_path).unwrap();
+        assert!(request(&mut ctx, &base, editor, "value-name;", false).await.is_empty());
+        std::fs::write(&consumer_path, consumer_text).unwrap();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", false).await.len(), 2);
+        ctx.session
+            .trigger_file_watcher(
+                consumer.clone(),
+                i_slint_live_preview::file_watcher::FileChangeKind::Changed,
+            )
+            .await
+            .unwrap();
+        assert_eq!(request(&mut ctx, &base, editor, "value-name;", false).await.len(), 2);
+        assert_eq!(ctx.session.document_cache.document_version(&base), Some(7));
+    }
+
+    #[tokio::test]
+    #[allow(deprecated)] // root_uri remains common among clients without workspace folders.
+    async fn root_uri_and_unopened_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_path = temp.path().join("base.slint");
+        let source = "export component Base { in-out property <int> value; }";
+        std::fs::write(&base_path, source).unwrap();
+        std::fs::write(
+            temp.path().join("use.slint"),
+            "import { Base } from \"base.slint\"; component App inherits Base { value: 1; }",
+        )
+        .unwrap();
+        let mut ctx = test::mock_context();
+        ctx.init_param.root_uri = Some(Url::from_directory_path(temp.path()).unwrap());
+        assert_eq!(
+            request(&mut ctx, &Url::from_file_path(base_path).unwrap(), source, "value;", true)
+                .await
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn multiple_roots_and_changed_dependency() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let base_path = first.path().join("base.slint");
+        let base = Url::from_file_path(&base_path).unwrap();
+        let base_source = "export component Base { in-out property <int> value; }";
+        std::fs::write(&base_path, base_source).unwrap();
+        let bridge_path = first.path().join("bridge.slint");
+        std::fs::write(&bridge_path, "export { Base as Public } from \"base.slint\";").unwrap();
+        let consumer_path = second.path().join("consumer.slint");
+        let consumer_source = format!(
+            "import {{ Public as Local }} from \"{}\"; component Consumer inherits Local {{ value: 1; }}",
+            bridge_path.display()
+        );
+        std::fs::write(&consumer_path, &consumer_source).unwrap();
+        let consumer = Url::from_file_path(&consumer_path).unwrap();
+        let mut ctx = test::mock_context();
+        ctx.init_param.workspace_folders = Some(
+            [first.path(), second.path(), first.path()]
+                .into_iter()
+                .map(|root| lsp_types::WorkspaceFolder {
+                    uri: Url::from_directory_path(root).unwrap(),
+                    name: "test".into(),
+                })
+                .collect(),
+        );
+        ctx.session
+            .open_document(consumer_source.clone(), consumer.clone(), Some(1))
+            .await
+            .unwrap();
+        assert_eq!(request(&mut ctx, &consumer, &consumer_source, "value:", true).await.len(), 2);
+        let shifted = format!("\n\n{base_source}");
+        std::fs::write(&base_path, &shifted).unwrap();
+        let hits = request(&mut ctx, &consumer, &consumer_source, "value:", true).await;
+        assert_eq!(hits.len(), 2);
+        let declaration = hits.iter().find(|l| l.uri == base).unwrap();
+        assert_eq!(declaration.range.start.line, 2);
+        assert_eq!(ctx.session.document_cache.document_version(&consumer), Some(1));
+    }
 
     fn location(dc: &DocumentCache, uri: &Url, source: &str, anchor: &str) -> Location {
         let offset = TextSize::new(source.find(anchor).unwrap() as u32);
@@ -323,13 +591,13 @@ component App {
             Some(lsp_types::OneOf::Left(true))
         );
         let revision = ctx.session.document_cache.revision();
-        let response = handlers.0["textDocument/references"](
+        let response = spin_on::spin_on(handlers.0["textDocument/references"](
             serde_json::json!({
                 "textDocument": { "uri": uri }, "position": position,
                 "context": { "includeDeclaration": false }
             }),
             &mut ctx,
-        )
+        ))
         .unwrap();
         let locations: Vec<Location> = serde_json::from_value(response).unwrap();
         assert_eq!(locations.len(), 1);

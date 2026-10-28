@@ -330,11 +330,18 @@ impl std::fmt::Display for LspErrorCode {
     }
 }
 
+type RequestFuture<'a, T> = std::pin::Pin<Box<dyn Future<Output = Result<T, LspError>> + 'a>>;
+
 #[derive(Default)]
 pub struct RequestHandler(
     pub  HashMap<
         &'static str,
-        Box<dyn Fn(serde_json::Value, &mut Context) -> Result<serde_json::Value, LspError>>,
+        Box<
+            dyn for<'a> Fn(
+                serde_json::Value,
+                &'a mut Context,
+            ) -> RequestFuture<'a, serde_json::Value>,
+        >,
     >,
 );
 
@@ -344,6 +351,19 @@ impl RequestHandler {
         handler: impl Fn(R::Params, &mut Context) -> Result<R::Result, LspError> + 'static,
     ) where
         R::Params: 'static,
+        R::Result: 'static,
+    {
+        self.register_async::<R>(move |params, ctx| {
+            Box::pin(std::future::ready(handler(params, ctx)))
+        });
+    }
+
+    pub fn register_async<R: lsp_types::request::Request>(
+        &mut self,
+        handler: impl for<'a> Fn(R::Params, &'a mut Context) -> RequestFuture<'a, R::Result> + 'static,
+    ) where
+        R::Params: 'static,
+        R::Result: 'static,
     {
         self.0.insert(
             R::METHOD,
@@ -351,8 +371,12 @@ impl RequestHandler {
                 let params = serde_json::from_value(value).map_err(|e| LspError {
                     code: LspErrorCode::InvalidParameter,
                     message: format!("error when deserializing request: {e:?}"),
-                })?;
-                handler(params, ctx).map(|x| serde_json::to_value(x).unwrap())
+                });
+                let future = match params {
+                    Ok(params) => handler(params, ctx),
+                    Err(error) => return Box::pin(std::future::ready(Err(error))),
+                };
+                Box::pin(async move { future.await.map(|x| serde_json::to_value(x).unwrap()) })
             }),
         );
     }
@@ -434,19 +458,23 @@ pub fn server_initialize_result(client_cap: &ClientCapabilities) -> InitializeRe
 }
 
 pub fn register_request_handlers(rh: &mut RequestHandler) {
-    rh.register::<References>(|params, ctx| {
-        Ok(token_descr(
-            &ctx.session.document_cache,
-            &params.text_document_position.text_document.uri,
-            &params.text_document_position.position,
-        )
-        .and_then(|(token, _)| {
-            references::references(
+    rh.register_async::<References>(|params, ctx| {
+        Box::pin(async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            references::load_workspace(ctx).await;
+            Ok(token_descr(
                 &ctx.session.document_cache,
-                token,
-                params.context.include_declaration,
+                &params.text_document_position.text_document.uri,
+                &params.text_document_position.position,
             )
-        }))
+            .and_then(|(token, _)| {
+                references::references(
+                    &ctx.session.document_cache,
+                    token,
+                    params.context.include_declaration,
+                )
+            }))
+        })
     });
     rh.register::<GotoDefinition>(|params, ctx| {
         let result = token_descr(
