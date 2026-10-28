@@ -432,7 +432,13 @@ fn rename_local_symbols(
 ) {
     let ti = &query.token_info;
 
-    for current in crate::token_info::symbol_occurrences(document_cache, &ti.info, document_node) {
+    let declaration = ti.info.declaration(document_cache);
+    for current in crate::token_info::symbol_occurrences(
+        document_cache,
+        &ti.info,
+        declaration.as_ref(),
+        document_node,
+    ) {
         if i_slint_compiler::parser::normalize_identifier(current.text()) == ti.name
             && !matches!(
                 current.parent().kind(),
@@ -735,8 +741,13 @@ struct TokenInformation {
 
 impl TokenInformation {
     fn is_same_symbol(&self, document_cache: &crate::DocumentCache, token: SyntaxToken) -> bool {
-        crate::token_info::token_info(document_cache, token)
-            .is_some_and(|info| self.info.is_same_symbol(document_cache, &info))
+        crate::token_info::token_info(document_cache, token).is_some_and(|info| {
+            self.info.is_same_symbol(
+                document_cache,
+                self.info.declaration(document_cache).as_ref(),
+                &info,
+            )
+        })
     }
 }
 

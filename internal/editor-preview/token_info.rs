@@ -55,146 +55,67 @@ impl TokenInfo {
     pub(crate) fn is_same_symbol(
         &self,
         document_cache: &crate::DocumentCache,
+        declaration: Option<&SyntaxNode>,
         other: &Self,
     ) -> bool {
-        if let (Some(left), Some(right)) =
-            (self.declaration(document_cache), other.declaration(document_cache))
-        {
+        let left = declaration;
+        let right = other.declaration(document_cache);
+        if let (Some(left), Some(right)) = (left, right.as_ref()) {
             return left.source_file.path() == right.source_file.path()
                 && left.text_range() == right.text_range();
         }
-        fn check_element(
-            element: &i_slint_compiler::object_tree::ElementRc,
-            node: &SyntaxNode,
-        ) -> bool {
+        fn check_element(element: &ElementRc, node: &SyntaxNode) -> bool {
             if element.borrow().debug.iter().any(|di| {
                 Arc::ptr_eq(&di.node.source_file, &node.source_file)
                     && di.node.text_range() == node.text_range()
             }) {
                 return true;
             }
-            if let i_slint_compiler::element_type::ElementType::Component(c) =
-                &element.borrow().base_type
-            {
+            if let ElementType::Component(c) = &element.borrow().base_type {
                 check_element(&c.root_element, node)
             } else {
                 false
             }
         }
 
+        let incomplete_member = match (self, other) {
+            (
+                Self::IncompleteNamedReference(ty, name),
+                Self::LocalProperty(_) | Self::LocalCallback(_) | Self::LocalFunction(_),
+            ) => Some((ty, name, right.as_ref())),
+            (
+                Self::LocalProperty(_) | Self::LocalCallback(_) | Self::LocalFunction(_),
+                Self::IncompleteNamedReference(ty, name),
+            ) => Some((ty, name, left)),
+            _ => None,
+        };
+        if let Some((ty, name, Some(node))) = incomplete_member {
+            return matches!(ty, ElementType::Component(c) if node.parent().is_some_and(|n| check_element(&c.root_element, &n)))
+                && node
+                    .child_node(SyntaxKind::DeclaredIdentifier)
+                    .and_then(|id| i_slint_compiler::parser::identifier_text(&id))
+                    .as_ref()
+                    == Some(name);
+        }
+
         match (self, other) {
-            (crate::token_info::TokenInfo::Type(s), crate::token_info::TokenInfo::Type(o)) => {
-                s == o
+            (Self::Type(s), Self::Type(o)) => s == o,
+            (Self::ElementType(s), Self::ElementType(o)) => s == o,
+            (Self::ElementRc(s), Self::ElementRc(o)) => Rc::ptr_eq(s, o),
+            (Self::NamedReference(nl), Self::NamedReference(nr)) => {
+                Rc::ptr_eq(&nl.element(), &nr.element()) && nl.name() == nr.name()
             }
-            (
-                crate::token_info::TokenInfo::ElementType(s),
-                crate::token_info::TokenInfo::ElementType(o),
-            ) => s == o,
-            (
-                crate::token_info::TokenInfo::ElementRc(s),
-                crate::token_info::TokenInfo::ElementRc(o),
-            ) => Rc::ptr_eq(s, o),
-            (
-                crate::token_info::TokenInfo::LocalProperty(s),
-                crate::token_info::TokenInfo::LocalProperty(o),
-            ) => Arc::ptr_eq(&s.source_file, &o.source_file) && s.text_range() == o.text_range(),
-            (
-                crate::token_info::TokenInfo::NamedReference(nl),
-                crate::token_info::TokenInfo::NamedReference(nr),
-            ) => Rc::ptr_eq(&nl.element(), &nr.element()) && nl.name() == nr.name(),
-            (
-                crate::token_info::TokenInfo::ElementType(
-                    i_slint_compiler::element_type::ElementType::Component(c),
-                ),
-                crate::token_info::TokenInfo::ElementRc(e),
-            )
-            | (
-                crate::token_info::TokenInfo::ElementRc(e),
-                crate::token_info::TokenInfo::ElementType(
-                    i_slint_compiler::element_type::ElementType::Component(c),
-                ),
-            ) => {
-                if let Some(ce) = c.node.as_ref().map(|cn| cn.Element()) {
+            (Self::ElementType(ElementType::Component(c)), Self::ElementRc(e))
+            | (Self::ElementRc(e), Self::ElementType(ElementType::Component(c))) => {
+                c.node.as_ref().is_some_and(|cn| {
+                    let ce = cn.Element();
                     e.borrow().debug.iter().any(|di| {
                         Some(di.node.source_file.path()) == ce.source_file().map(|sf| sf.path())
                             && di.node.text_range() == ce.text_range()
                     })
-                } else {
-                    false
-                }
+                })
             }
-            (
-                crate::token_info::TokenInfo::NamedReference(nr),
-                crate::token_info::TokenInfo::LocalProperty(s),
-            )
-            | (
-                crate::token_info::TokenInfo::LocalProperty(s),
-                crate::token_info::TokenInfo::NamedReference(nr),
-            ) => named_reference_resolves_to(nr, s),
-            (
-                crate::token_info::TokenInfo::LocalProperty(s),
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-            )
-            | (
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-                crate::token_info::TokenInfo::LocalProperty(s),
-            ) => {
-                matches!(nr1, i_slint_compiler::element_type::ElementType::Component(c) if s.parent().is_some_and(|n| check_element(&c.root_element, &n)))
-                    && Some(nr2)
-                        == i_slint_compiler::parser::identifier_text(&s.DeclaredIdentifier())
-                            .as_ref()
-            }
-            (
-                crate::token_info::TokenInfo::LocalCallback(s),
-                crate::token_info::TokenInfo::LocalCallback(o),
-            ) => Arc::ptr_eq(&s.source_file, &o.source_file) && s.text_range() == o.text_range(),
-            (
-                crate::token_info::TokenInfo::NamedReference(nr),
-                crate::token_info::TokenInfo::LocalCallback(s),
-            )
-            | (
-                crate::token_info::TokenInfo::LocalCallback(s),
-                crate::token_info::TokenInfo::NamedReference(nr),
-            ) => named_reference_resolves_to(nr, s),
-            (
-                crate::token_info::TokenInfo::LocalCallback(s),
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-            )
-            | (
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-                crate::token_info::TokenInfo::LocalCallback(s),
-            ) => {
-                matches!(nr1, i_slint_compiler::element_type::ElementType::Component(c) if s.parent().is_some_and(|n| check_element(&c.root_element, &n)))
-                    && Some(nr2)
-                        == i_slint_compiler::parser::identifier_text(&s.DeclaredIdentifier())
-                            .as_ref()
-            }
-            (
-                crate::token_info::TokenInfo::LocalFunction(s),
-                crate::token_info::TokenInfo::LocalFunction(o),
-            ) => Arc::ptr_eq(&s.source_file, &o.source_file) && s.text_range() == o.text_range(),
-            (
-                crate::token_info::TokenInfo::NamedReference(nr),
-                crate::token_info::TokenInfo::LocalFunction(s),
-            )
-            | (
-                crate::token_info::TokenInfo::LocalFunction(s),
-                crate::token_info::TokenInfo::NamedReference(nr),
-            ) => named_reference_resolves_to(nr, s),
-            (
-                crate::token_info::TokenInfo::LocalFunction(s),
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-            )
-            | (
-                crate::token_info::TokenInfo::IncompleteNamedReference(nr1, nr2),
-                crate::token_info::TokenInfo::LocalFunction(s),
-            ) => {
-                matches!(nr1, i_slint_compiler::element_type::ElementType::Component(c) if s.parent().is_some_and(|n| check_element(&c.root_element, &n)))
-                    && Some(nr2)
-                        == i_slint_compiler::parser::identifier_text(&s.DeclaredIdentifier())
-                            .as_ref()
-            }
-            (_, _) => false,
+            _ => false,
         }
     }
 
@@ -565,9 +486,10 @@ pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> 
 pub fn symbol_occurrences(
     document_cache: &crate::DocumentCache,
     symbol: &TokenInfo,
+    declaration: Option<&SyntaxNode>,
     document: &syntax_nodes::Document,
 ) -> Vec<SyntaxToken> {
-    let Some(declaration) = symbol.declaration(document_cache) else { return Vec::new() };
+    let Some(declaration) = declaration else { return Vec::new() };
     let identifier = declaration
         .child_node(SyntaxKind::DeclaredIdentifier)
         .and_then(|id| id.child_token(SyntaxKind::Identifier))
@@ -584,30 +506,42 @@ pub fn symbol_occurrences(
         std::collections::HashSet::from([i_slint_compiler::parser::normalize_identifier(
             identifier.text(),
         )]);
-    for import in document.ImportSpecifier().filter_map(|i| i.ImportIdentifierList()) {
-        for id in import.ImportIdentifier() {
-            let external = id.ExternalName().child_token(SyntaxKind::Identifier);
-            if let Some(external) = external
-                && token_info(document_cache, external.clone())
-                    .is_some_and(|info| symbol.is_same_symbol(document_cache, &info))
-            {
-                names.insert(i_slint_compiler::parser::normalize_identifier(external.text()));
-                if let Some(internal) =
-                    id.InternalName().and_then(|n| n.child_token(SyntaxKind::Identifier))
+    let importable =
+        matches!(declaration.kind(), SyntaxKind::StructDeclaration | SyntaxKind::EnumDeclaration)
+            || declaration.kind() == SyntaxKind::Element
+                && declaration
+                    .parent()
+                    .is_some_and(|parent| parent.kind() == SyntaxKind::Component);
+    if importable {
+        for import in document.ImportSpecifier().filter_map(|i| i.ImportIdentifierList()) {
+            for id in import.ImportIdentifier() {
+                let external = id.ExternalName().child_token(SyntaxKind::Identifier);
+                if let Some(external) = external
+                    && token_info(document_cache, external.clone()).is_some_and(|info| {
+                        symbol.is_same_symbol(document_cache, Some(declaration), &info)
+                    })
                 {
-                    names.insert(i_slint_compiler::parser::normalize_identifier(internal.text()));
+                    names.insert(i_slint_compiler::parser::normalize_identifier(external.text()));
+                    if let Some(internal) =
+                        id.InternalName().and_then(|n| n.child_token(SyntaxKind::Identifier))
+                    {
+                        names.insert(i_slint_compiler::parser::normalize_identifier(
+                            internal.text(),
+                        ));
+                    }
                 }
             }
         }
-    }
-    for export in document.ExportsList() {
-        for specifier in export.ExportSpecifier() {
-            for node in specifier.children() {
-                if let Some(token) = node.child_token(SyntaxKind::Identifier)
-                    && token_info(document_cache, token.clone())
-                        .is_some_and(|info| symbol.is_same_symbol(document_cache, &info))
-                {
-                    names.insert(i_slint_compiler::parser::normalize_identifier(token.text()));
+        for export in document.ExportsList() {
+            for specifier in export.ExportSpecifier() {
+                for node in specifier.children() {
+                    if let Some(token) = node.child_token(SyntaxKind::Identifier)
+                        && token_info(document_cache, token.clone()).is_some_and(|info| {
+                            symbol.is_same_symbol(document_cache, Some(declaration), &info)
+                        })
+                    {
+                        names.insert(i_slint_compiler::parser::normalize_identifier(token.text()));
+                    }
                 }
             }
         }
@@ -619,7 +553,7 @@ pub fn symbol_occurrences(
         if current.kind() == SyntaxKind::Identifier
             && names.contains(&i_slint_compiler::parser::normalize_identifier(current.text()))
             && let Some(info) = token_info(document_cache, current.clone())
-            && symbol.is_same_symbol(document_cache, &info)
+            && symbol.is_same_symbol(document_cache, Some(declaration), &info)
         {
             occurrences.push(current);
         }
@@ -642,22 +576,4 @@ fn find_property_declaration_in_base(
 
     let element_type = crate::util::lookup_current_element_type((*element).clone(), tr)?;
     Some(TokenInfo::IncompleteNamedReference(element_type, prop_name.to_smolstr()))
-}
-
-/// Whether `named_reference` resolves to the member declared at `declaration`. The reference's name
-/// is the key the member is stored under - for a declaration that shadows an inherited member that is
-/// a mangled internal name - so comparing the resolved node matches the shadowing declaration even
-/// though that key differs from the source name.
-fn named_reference_resolves_to(
-    named_reference: &i_slint_compiler::namedreference::NamedReference,
-    declaration: &SyntaxNode,
-) -> bool {
-    named_reference
-        .element()
-        .borrow()
-        .property_declaration_node(named_reference.name())
-        .is_some_and(|node| {
-            Arc::ptr_eq(&node.source_file, &declaration.source_file)
-                && node.text_range() == declaration.text_range()
-        })
 }

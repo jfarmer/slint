@@ -21,8 +21,9 @@ pub async fn load_workspace(ctx: &mut super::Context) {
     let cached: HashMap<_, _> = dc
         .all_url_documents()
         .filter(|(url, _)| url.scheme() == "file")
-        .map(|(url, node)| (url, node.source_file.source().unwrap_or_default().to_string()))
+        .map(|(url, node)| (url, node.source_file.clone()))
         .collect();
+    let cached_urls: Vec<_> = cached.keys().cloned().collect();
     let open: HashSet<_> = ctx
         .session
         .open_urls
@@ -71,14 +72,16 @@ pub async fn load_workspace(ctx: &mut super::Context) {
                 if open.contains(&url) {
                     return None;
                 }
-                match std::fs::read_to_string(&path) {
-                    Ok(source) => Some((url, Some(source))),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some((url, None)),
+                let source = match std::fs::read_to_string(&path) {
+                    Ok(source) => Some(source),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                     Err(error) => {
                         tracing::debug!("Cannot read {}: {error}", path.display());
-                        None
+                        return None;
                     }
-                }
+                };
+                let previous = cached.get(&url).map(|file| file.source().unwrap_or_default());
+                (source.as_deref() != previous).then_some((url, source))
             })
             .collect::<Vec<_>>()
     })
@@ -90,10 +93,8 @@ pub async fn load_workspace(ctx: &mut super::Context) {
             return;
         }
     };
-    for (url, source) in &sources {
-        if source.as_ref() != cached.get(url)
-            && let Err(error) = dc.drop_document(url)
-        {
+    for (url, _) in &sources {
+        if let Err(error) = dc.drop_document(url) {
             tracing::debug!("Cannot invalidate {url}: {error}");
         }
     }
@@ -107,8 +108,8 @@ pub async fn load_workspace(ctx: &mut super::Context) {
             }
         }
     }
-    for url in cached.keys() {
-        dc.reload_cached_file(url, &mut BuildDiagnostics::default()).await;
+    for url in cached_urls {
+        dc.reload_cached_file(&url, &mut BuildDiagnostics::default()).await;
     }
 }
 
@@ -121,12 +122,15 @@ pub fn references(
         return None;
     }
     let symbol = token_info::token_info(document_cache, token)?;
+    let declaration = symbol.declaration(document_cache);
     let mut locations = Vec::new();
     for (uri, document) in document_cache.all_url_documents() {
         if uri.scheme() == "builtin" {
             continue;
         }
-        for occurrence in token_info::symbol_occurrences(document_cache, &symbol, document) {
+        for occurrence in
+            token_info::symbol_occurrences(document_cache, &symbol, declaration.as_ref(), document)
+        {
             if !include_declaration && is_declaration(&occurrence) {
                 continue;
             }
@@ -610,16 +614,7 @@ component App {
     fn standard_request_is_read_only() {
         let source = "export component App { in-out property <int> value; x: value; }";
         let (dc, uri, _) = test::loaded_document_cache(source.into());
-        let declaration = source.find("value;").unwrap();
-        let doc = dc.get_document(&uri).unwrap().node.as_ref().unwrap();
-        let position = crate::util::text_size_to_lsp_position(
-            &doc.source_file,
-            TextSize::new(declaration as u32),
-            dc.format,
-        );
         let mut ctx = test::mock_context_with_document_cache(dc);
-        let mut handlers = crate::language::RequestHandler::default();
-        crate::language::register_request_handlers(&mut handlers);
         assert_eq!(
             crate::language::server_initialize_result(&Default::default())
                 .capabilities
@@ -627,15 +622,7 @@ component App {
             Some(lsp_types::OneOf::Left(true))
         );
         let revision = ctx.session.document_cache.revision();
-        let response = spin_on::spin_on(handlers.0["textDocument/references"](
-            serde_json::json!({
-                "textDocument": { "uri": uri }, "position": position,
-                "context": { "includeDeclaration": false }
-            }),
-            &mut ctx,
-        ))
-        .unwrap();
-        let locations: Vec<Location> = serde_json::from_value(response).unwrap();
+        let locations = spin_on::spin_on(request(&mut ctx, &uri, source, "value;", false));
         assert_eq!(locations.len(), 1);
         assert_eq!(ctx.session.document_cache.revision(), revision);
         assert_eq!(
