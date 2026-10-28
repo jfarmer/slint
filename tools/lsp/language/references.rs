@@ -562,6 +562,36 @@ component App {
     }
 
     #[test]
+    fn struct_fields_in_literals() {
+        let source = r#"
+struct Data { value-name/*declaration*/: int }
+struct Other { value-name: int }
+struct Nested { data: Data }
+component App {
+    in property <Data> data: { value_name/*initializer*/: 1 };
+    in property <Other> other: { value-name/*unrelated*/: 2 };
+    in property <Nested> nested: { data: { value-name/*nested*/: 3 } };
+    in property <[Data]> rows: [{ value-name/*array*/: 4 }];
+    function take(data: Data) {}
+    init => { take({ value-name/*argument*/: 5 }); }
+    x: data.value-name/*read*/;
+}"#;
+        let (dc, uri, _) = test::loaded_document_cache(source.into());
+        let all = [
+            "value-name/*declaration*/",
+            "value_name/*initializer*/",
+            "value-name/*nested*/",
+            "value-name/*array*/",
+            "value-name/*argument*/",
+            "value-name/*read*/",
+        ];
+        for query in ["value-name/*declaration*/", "value_name/*initializer*/"] {
+            check(&dc, &uri, source, query, &all, true);
+            check(&dc, &uri, source, query, &all[1..], false);
+        }
+    }
+
+    #[test]
     fn import_export_aliases() {
         let source = "export component Original/*decl*/ {}";
         let (dc, uri, _) = test::loaded_document_cache(source.into());

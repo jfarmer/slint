@@ -248,6 +248,20 @@ pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> 
             _ => None,
         };
     }
+    if node.kind() == SyntaxKind::ObjectMember && token.kind() == SyntaxKind::Identifier {
+        let name = i_slint_compiler::parser::normalize_identifier(token.text());
+        return crate::util::with_lookup_ctx(
+            document_cache,
+            node,
+            Some(token.text_range().start()),
+            |ctx| match &ctx.expected_type {
+                Type::Struct(s) if s.fields.contains_key(&name) => {
+                    Some(TokenInfo::StructField(s.clone(), name))
+                }
+                _ => None,
+            },
+        )?;
+    }
     if node.kind() == SyntaxKind::AtImageUrl && token.kind() == SyntaxKind::StringLiteral {
         let path = i_slint_compiler::literals::unescape_string(token.text())?;
         return Some(TokenInfo::Image(token.source_file.path().parent().join(&path)?));
