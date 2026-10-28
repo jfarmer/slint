@@ -8,6 +8,7 @@ pub mod completion;
 mod formatting;
 mod goto;
 mod hover;
+mod references;
 mod semantic_tokens;
 mod signature_help;
 #[cfg(test)]
@@ -43,8 +44,8 @@ use lsp_types::{
     request::{
         CodeActionRequest, CodeLensRequest, ColorPresentationRequest, Completion, DocumentColor,
         DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand, Formatting,
-        GotoDefinition, HoverRequest, PrepareRenameRequest, Rename, SemanticTokensFullRequest,
-        SignatureHelpRequest,
+        GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
+        SemanticTokensFullRequest, SignatureHelpRequest,
     },
 };
 
@@ -403,6 +404,7 @@ pub fn server_initialize_result(client_cap: &ClientCapabilities) -> InitializeRe
                 .into(),
             ),
             document_highlight_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
             rename_provider: Some(
                 if client_cap
                     .text_document
@@ -432,6 +434,20 @@ pub fn server_initialize_result(client_cap: &ClientCapabilities) -> InitializeRe
 }
 
 pub fn register_request_handlers(rh: &mut RequestHandler) {
+    rh.register::<References>(|params, ctx| {
+        Ok(token_descr(
+            &ctx.session.document_cache,
+            &params.text_document_position.text_document.uri,
+            &params.text_document_position.position,
+        )
+        .and_then(|(token, _)| {
+            references::references(
+                &ctx.session.document_cache,
+                token,
+                params.context.include_declaration,
+            )
+        }))
+    });
     rh.register::<GotoDefinition>(|params, ctx| {
         let result = token_descr(
             &ctx.session.document_cache,
