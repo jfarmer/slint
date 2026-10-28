@@ -632,32 +632,50 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
         let not_empty = !document_highlights.is_empty();
         Ok(not_empty.then_some(document_highlights))
     });
-    rh.register::<Rename>(|params, ctx| {
-        let uri = params.text_document_position.text_document.uri;
-        if let Some((tk, _off)) =
-            token_descr(&ctx.session.document_cache, &uri, &params.text_document_position.position)
-        {
-            let p = tk.parent();
-            let version = ctx.session.document_cache.document_version(&uri);
-            if let Some(value) =
-                editor_preview::editing::rename_element_id::find_element_ids(&tk, &p)
-            {
-                let edits: Vec<_> = value
-                    .into_iter()
-                    .map(|r| TextEdit {
-                        range: util::text_range_to_lsp_range(
-                            &p.source_file,
-                            r,
-                            ctx.session.document_cache.format,
-                        ),
-                        new_text: params.new_name.clone(),
-                    })
-                    .collect();
-                return Ok(Some(editor_preview::editing::create_workspace_edit(
-                    uri, version, edits,
-                )));
+    rh.register_async::<Rename>(|params, ctx| {
+        Box::pin(async move {
+            let uri = params.text_document_position.text_document.uri;
+            #[cfg(not(target_arch = "wasm32"))]
+            let target_is_open = ctx.session.open_urls.contains(&uri);
+            #[cfg(not(target_arch = "wasm32"))]
+            if !target_is_open {
+                references::load_workspace(ctx).await;
             }
-            if let Some(declaration_node) =
+            if let Some((tk, _off)) = token_descr(
+                &ctx.session.document_cache,
+                &uri,
+                &params.text_document_position.position,
+            ) {
+                let p = tk.parent();
+                let version = ctx.session.document_cache.document_version(&uri);
+                if let Some(value) =
+                    editor_preview::editing::rename_element_id::find_element_ids(&tk, &p)
+                {
+                    let edits: Vec<_> = value
+                        .into_iter()
+                        .map(|r| TextEdit {
+                            range: util::text_range_to_lsp_range(
+                                &p.source_file,
+                                r,
+                                ctx.session.document_cache.format,
+                            ),
+                            new_text: params.new_name.clone(),
+                        })
+                        .collect();
+                    return Ok(Some(editor_preview::editing::create_workspace_edit(
+                        uri, version, edits,
+                    )));
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            if target_is_open {
+                references::load_workspace(ctx).await;
+            }
+            if let Some((tk, _off)) = token_descr(
+                &ctx.session.document_cache,
+                &uri,
+                &params.text_document_position.position,
+            ) && let Some(declaration_node) =
                 editor_preview::editing::rename_component::find_declaration_node(
                     &ctx.session.document_cache,
                     &tk,
@@ -669,20 +687,19 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
                     code: LspErrorCode::RequestFailed,
                     message: e.to_string(),
                 })?;
-                // After the synchronous slint-only rename, ask the user (once)
+                // After the Slint rename, ask the user (once)
                 // whether to also search and replace the generated Rust/C++
                 // accessors. The dialog and follow-up edit have to
-                // run asynchronously: the request handler is synchronous and
-                // must return the slint edit immediately.
+                // run separately so the request returns the Slint edit immediately.
                 #[cfg(not(target_arch = "wasm32"))]
                 schedule_host_language_rename_followup(ctx, &declaration_node, &params.new_name);
                 return Ok(Some(edit));
             }
-        }
 
-        Err(LspError {
-            code: LspErrorCode::RequestFailed,
-            message: "This symbol cannot be renamed.".into(),
+            Err(LspError {
+                code: LspErrorCode::RequestFailed,
+                message: "This symbol cannot be renamed.".into(),
+            })
         })
     });
     rh.register::<PrepareRenameRequest>(|params, ctx| {

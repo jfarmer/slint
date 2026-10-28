@@ -297,6 +297,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standard_rename_includes_unopened_consumers() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_path = temp.path().join("base.slint");
+        let uri = Url::from_file_path(&base_path).unwrap();
+        let source = "export component Base { in-out property <int> count; }";
+        std::fs::write(&base_path, source.replace("count", "disk-count")).unwrap();
+        let consumer_path = temp.path().join("consumer.slint");
+        let consumer = Url::from_file_path(&consumer_path).unwrap();
+        let consumer_source = "import { Base as Local } from \"base.slint\"; component App inherits Local { count: 1; }";
+        std::fs::write(&consumer_path, consumer_source).unwrap();
+        let mut ctx = test::mock_context();
+        ctx.init_param.workspace_folders = Some(vec![lsp_types::WorkspaceFolder {
+            uri: Url::from_directory_path(temp.path()).unwrap(),
+            name: "test".into(),
+        }]);
+        ctx.session.open_document(source.into(), uri.clone(), Some(7)).await.unwrap();
+        assert!(ctx.session.document_cache.get_document(&consumer).is_none());
+        let mut handlers = crate::language::RequestHandler::default();
+        crate::language::register_request_handlers(&mut handlers);
+        for (target, target_source) in [(&uri, source), (&consumer, consumer_source)] {
+            let params = serde_json::json!({
+                "textDocument": { "uri": target },
+                "position": { "line": 0, "character": target_source.find("count").unwrap() },
+                "newName": "total"
+            });
+            let result = tokio::task::LocalSet::new()
+                .run_until(async { handlers.0["textDocument/rename"](params, &mut ctx).await })
+                .await
+                .unwrap();
+            let edit: lsp_types::WorkspaceEdit = serde_json::from_value(result).unwrap();
+            let edited = crate::editor_preview::editing::text_edit::apply_workspace_edit(
+                &ctx.session.document_cache,
+                &edit,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|file| (file.url, file.contents))
+            .collect::<std::collections::HashMap<_, _>>();
+            assert_eq!(
+                edited,
+                std::collections::HashMap::from([
+                    (uri.clone(), source.replace("count", "total")),
+                    (consumer.clone(), consumer_source.replace("count", "total")),
+                ])
+            );
+            assert_eq!(ctx.session.document_cache.document_version(&uri), Some(7));
+        }
+    }
+
+    #[tokio::test]
     async fn multiple_roots_and_changed_dependency() {
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
