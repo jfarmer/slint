@@ -1385,7 +1385,8 @@ fn get_document_symbols(
                 util::node_to_lsp_range(element_node.QualifiedName().as_ref()?, format)
             };
             Some(DocumentSymbol {
-                range: util::node_to_lsp_range(&sub_element_node, format),
+                range: editor_preview::ElementRcNode::new(child.clone(), 0)?
+                    .with_decorated_node(|node| util::node_to_lsp_range(&node, format)),
                 selection_range,
                 name: id.as_ref().map_or_else(|| e.base_type.to_string(), |id| id.text().into()),
                 detail: id.map(|_| e.base_type.to_string()),
@@ -2367,6 +2368,58 @@ export component App {
             check(&child[0], "count", K::PROPERTY, "in property <int> count: 2;");
             check(&child[1], "changed", K::EVENT, "callback changed;");
             check(&child[2], "run", K::FUNCTION, "function run() {}");
+        }
+    }
+
+    #[test]
+    fn test_document_symbols_conditional_and_repeated_elements() {
+        let conditional =
+            "if true: conditional := Rectangle {\n        in property <int> count: 1;\n    }";
+        let repeated = "for value in [1, 2]: repeated := Rectangle {\n        in property <int> count: value;\n    }";
+        let source = format!(
+            "component App {{\n    /* 😀 */ {conditional}\n    {repeated}\n    after := Rectangle {{}}\n}}"
+        );
+        let (mut dc, uri, diagnostics) = loaded_document_cache(source.clone());
+        assert!(
+            diagnostics
+                .values()
+                .flatten()
+                .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "{diagnostics:?}"
+        );
+        for format in [editor_preview::ByteFormat::Utf8, editor_preview::ByteFormat::Utf16] {
+            dc.format = format;
+            let DocumentSymbolResponse::Nested(symbols) = get_document_symbols(
+                &mut dc,
+                &lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+            )
+            .unwrap() else {
+                panic!("expected nested symbols")
+            };
+            let children = symbols[0].children.as_ref().unwrap();
+            assert_eq!(children.len(), 3);
+            for (symbol, name, declaration) in
+                [(&children[0], "conditional", conditional), (&children[1], "repeated", repeated)]
+            {
+                let text = |range: lsp_types::Range| {
+                    let (_, start) = dc.get_document_and_offset(&uri, &range.start).unwrap();
+                    let (_, end) = dc.get_document_and_offset(&uri, &range.end).unwrap();
+                    &source[usize::from(start)..usize::from(end)]
+                };
+                assert_eq!(symbol.name, name);
+                assert_eq!(text(symbol.selection_range), name);
+                assert_eq!(text(symbol.range), declaration);
+                let member = &symbol.children.as_ref().unwrap()[0];
+                assert_eq!(member.name, "count");
+                assert_eq!(text(member.selection_range), "count");
+                assert!(member.range.start >= symbol.range.start);
+                assert!(member.range.end <= symbol.range.end);
+            }
+            assert_eq!(
+                children[0].range.start.character,
+                if format == editor_preview::ByteFormat::Utf8 { 15 } else { 13 }
+            );
+            assert_eq!(children[2].name, "after");
         }
     }
 
