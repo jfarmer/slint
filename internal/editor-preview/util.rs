@@ -324,7 +324,7 @@ pub fn with_lookup_ctx<R>(
             .flat_map(|a| i_slint_compiler::parser::identifier_text(&a))
             .collect();
         if let Some(block) = cb.CodeBlock() {
-            add_codeblock_local_variables(&block, to_offset, &mut lookup_context);
+            add_codeblock_local_variables(&block, offset, &mut lookup_context);
         }
     } else if let Some(f) = element.Function().find(|p| {
         i_slint_compiler::parser::identifier_text(&p.DeclaredIdentifier())
@@ -336,21 +336,21 @@ pub fn with_lookup_ctx<R>(
             .collect();
 
         if let Some(block) = f.CodeBlock() {
-            add_codeblock_local_variables(&block, to_offset, &mut lookup_context);
+            add_codeblock_local_variables(&block, offset, &mut lookup_context);
         }
     } else if let Some(cb) = element
         .PropertyChangedCallback()
         .find(|p| i_slint_compiler::parser::identifier_text(p).is_some_and(|x| x == prop_name))
     {
         if let Some(block) = cb.CodeBlock() {
-            add_codeblock_local_variables(&block, to_offset, &mut lookup_context);
+            add_codeblock_local_variables(&block, offset, &mut lookup_context);
         }
     } else if let Some(b) = element
         .Binding()
         .find(|p| i_slint_compiler::parser::identifier_text(p).is_some_and(|x| x == prop_name))
         && let Some(cb) = b.BindingExpression().CodeBlock()
     {
-        add_codeblock_local_variables(&cb, to_offset, &mut lookup_context);
+        add_codeblock_local_variables(&cb, offset, &mut lookup_context);
     }
 
     if let Some(subject) = &expr_context_info.match_subject {
@@ -390,18 +390,16 @@ pub fn with_lookup_ctx<R>(
 // recursively add local variables from a code block to the context
 fn add_codeblock_local_variables(
     code_block: &syntax_nodes::CodeBlock,
-    to_offset: Option<TextSize>,
+    offset: TextSize,
     ctx: &mut LookupCtx,
 ) {
-    if let Some(offset) = to_offset
-        && !code_block.text_range().contains(offset)
-    {
+    if !code_block.text_range().contains(offset) {
         return; // out of scope
     }
 
     let locals = code_block
         .LetStatement()
-        .take_while(|e| to_offset.is_none_or(|offset| e.text_range().start() < offset))
+        .take_while(|e| e.text_range().end() <= offset)
         .map(|e| {
             let value = Expression::from_expression_node(e.Expression(), ctx);
             let ty = e
@@ -418,11 +416,14 @@ fn add_codeblock_local_variables(
 
     ctx.local_variables.push(locals);
 
-    code_block.Expression().for_each(|e| {
-        if let Some(cb) = e.CodeBlock() {
-            add_codeblock_local_variables(&cb, to_offset, ctx);
+    let mut node: SyntaxNode = code_block.clone().into();
+    while let Some(child) = node.children().find(|n| n.text_range().contains(offset)) {
+        if let Some(block) = syntax_nodes::CodeBlock::new(child.clone()) {
+            add_codeblock_local_variables(&block, offset, ctx);
+            break;
         }
-    })
+        node = child;
+    }
 }
 
 /// The element and property name we are in, plus (from the same walk) the expression to probe.

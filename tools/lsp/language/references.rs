@@ -454,6 +454,42 @@ component Unrelated {
     }
 
     #[test]
+    fn lexical_shadowing() {
+        let source = r#"
+component App {
+    in property <int> value-name/*declaration*/;
+    function inspect() {
+        debug(value-name/*before*/);
+        let value-name = value-name/*initializer*/;
+        debug(value-name/*local*/);
+        debug(root.value_name/*qualified*/);
+    }
+    function with-argument(value_name: int) { debug(value-name/*argument*/); }
+    function nested() {
+        if true { let value-name = 3; debug(value-name/*nested-local*/); }
+        debug(value-name/*after-block*/);
+    }
+    x: value-name/*outside*/;
+}"#;
+        let (dc, uri, _) = test::loaded_document_cache(source.into());
+        check(
+            &dc,
+            &uri,
+            source,
+            "value-name/*declaration*/",
+            &[
+                "value-name/*declaration*/",
+                "value-name/*before*/",
+                "value-name/*initializer*/",
+                "value_name/*qualified*/",
+                "value-name/*after-block*/",
+                "value-name/*outside*/",
+            ],
+            true,
+        );
+    }
+
+    #[test]
     fn shadowed_members() {
         let source = r#"
 component Base {

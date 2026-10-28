@@ -358,24 +358,29 @@ pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> 
                     if token.kind() != SyntaxKind::Identifier {
                         return None;
                     }
-                    let lr = crate::util::with_lookup_ctx(document_cache, node, None, |ctx| {
-                        let mut it = n
-                            .children_with_tokens()
-                            .filter_map(|t| t.into_token())
-                            .filter(|t| t.kind() == SyntaxKind::Identifier);
-                        let mut cur_tok = it.next()?;
-                        let first_str =
-                            i_slint_compiler::parser::normalize_identifier(cur_tok.text());
-                        let global = i_slint_compiler::lookup::global_lookup();
-                        let mut expr_it = global.lookup(ctx, &first_str)?;
-                        while cur_tok.token != token.token {
-                            cur_tok = it.next()?;
-                            let str =
+                    let lr = crate::util::with_lookup_ctx(
+                        document_cache,
+                        node,
+                        Some(token.text_range().start()),
+                        |ctx| {
+                            let mut it = n
+                                .children_with_tokens()
+                                .filter_map(|t| t.into_token())
+                                .filter(|t| t.kind() == SyntaxKind::Identifier);
+                            let mut cur_tok = it.next()?;
+                            let first_str =
                                 i_slint_compiler::parser::normalize_identifier(cur_tok.text());
-                            expr_it = expr_it.lookup(ctx, &str)?;
-                        }
-                        Some(expr_it)
-                    })?;
+                            let global = i_slint_compiler::lookup::global_lookup();
+                            let mut expr_it = global.lookup(ctx, &first_str)?;
+                            while cur_tok.token != token.token {
+                                cur_tok = it.next()?;
+                                let str =
+                                    i_slint_compiler::parser::normalize_identifier(cur_tok.text());
+                                expr_it = expr_it.lookup(ctx, &str)?;
+                            }
+                            Some(expr_it)
+                        },
+                    )?;
                     token_info_from_lookup_result(lr?)
                 }
                 _ => None,
@@ -386,9 +391,12 @@ pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> 
                 return None;
             }
             let name = i_slint_compiler::parser::normalize_identifier(token.text());
-            let lr = crate::util::with_lookup_ctx(document_cache, node.clone(), None, |ctx| {
-                Expression::from_expression_node(n.Expression(), ctx).lookup(ctx, &name)
-            })?;
+            let lr = crate::util::with_lookup_ctx(
+                document_cache,
+                node.clone(),
+                Some(token.text_range().start()),
+                |ctx| Expression::from_expression_node(n.Expression(), ctx).lookup(ctx, &name),
+            )?;
             return token_info_from_lookup_result(lr?);
         } else if let Some(n) = syntax_nodes::ImportIdentifier::new(node.clone()) {
             let doc = document_cache.get_document_for_source_file(&node.source_file)?;
