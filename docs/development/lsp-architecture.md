@@ -166,7 +166,13 @@ The server compares unopened files with cached source text, invalidates changed 
 and loads new files with the existing compiler configuration.
 Open buffers retain their unsaved contents and versions.
 Unchanged documents reuse their syntax and semantic data.
-There is no separate reference index.
+Identifier positions are indexed lazily for each parsed source version.
+The index narrows candidate tokens.
+Semantic resolution still checks scopes, inheritance, and aliases.
+Closing a document removes its index.
+A source change replaces the index on the next search.
+The document cache retains one reference result, keyed by declaration, document revision, position encoding, and `includeDeclaration`.
+Workspace discovery and content comparisons run before consulting this cache.
 
 The WebAssembly server searches documents supplied by its host and their loaded imports.
 It doesn't enumerate the host's filesystem.
@@ -264,6 +270,9 @@ When a file changes on disk:
 2. Queue any open dependent documents for recompilation via `pending_recompile`
 3. After a debounce delay, recompile all pending documents
 4. If a resource file changes, the live preview is reloaded
+
+The native request loop coalesces watch-set reconciliation while LSP messages are queued.
+It reconciles before waiting for another message, or after 10 ms of processing queued messages.
 
 ## Commands
 

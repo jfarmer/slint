@@ -123,6 +123,11 @@ pub fn references(
     }
     let symbol = token_info::token_info(document_cache, token)?;
     let declaration = symbol.declaration(document_cache);
+    if let Some(declaration) = declaration.as_ref()
+        && let Some(locations) = document_cache.cached_references(declaration, include_declaration)
+    {
+        return Some(locations);
+    }
     let mut locations = Vec::new();
     for (uri, document) in document_cache.all_url_documents() {
         if uri.scheme() == "builtin" {
@@ -142,6 +147,9 @@ pub fn references(
     }
     locations.sort_by(|a, b| a.uri.cmp(&b.uri).then(a.range.start.cmp(&b.range.start)));
     locations.dedup();
+    if let Some(declaration) = declaration.as_ref() {
+        document_cache.cache_references(declaration, include_declaration, &locations);
+    }
     Some(locations)
 }
 
@@ -411,6 +419,42 @@ mod tests {
         let mut expected: Vec<_> = expected.iter().map(|a| location(dc, uri, source, a)).collect();
         expected.sort_by_key(|l| l.range.start);
         assert_eq!(actual, expected, "query: {query}");
+    }
+
+    #[test]
+    fn repeated_queries_follow_encoding_and_source_changes() {
+        let source = "export component App { in-out property <int> value-name/*decl*/; /* 😀 */ out property <int> result: value_name/*read*/; }";
+        let (mut dc, uri, _) = test::loaded_document_cache(source.into());
+        for format in
+            [crate::editor_preview::ByteFormat::Utf8, crate::editor_preview::ByteFormat::Utf16]
+        {
+            dc.format = format;
+            for _ in 0..2 {
+                check(
+                    &dc,
+                    &uri,
+                    source,
+                    "value-name/*decl*/",
+                    &["value-name/*decl*/", "value_name/*read*/"],
+                    true,
+                );
+            }
+        }
+        check(&dc, &uri, source, "value-name/*decl*/", &["value_name/*read*/"], false);
+        let updated = format!("\n\n{source}");
+        let mut diagnostics = i_slint_compiler::diagnostics::BuildDiagnostics::default();
+        spin_on::spin_on(dc.load_url(&uri, Some(43), updated.clone(), &mut diagnostics)).unwrap();
+        assert!(!diagnostics.has_errors(), "{:?}", diagnostics.to_string_vec());
+        for _ in 0..2 {
+            check(
+                &dc,
+                &uri,
+                &updated,
+                "value-name/*decl*/",
+                &["value-name/*decl*/", "value_name/*read*/"],
+                true,
+            );
+        }
     }
 
     #[test]

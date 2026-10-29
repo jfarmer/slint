@@ -61,6 +61,16 @@ pub struct DocumentCache {
     pub format: crate::ByteFormat,
     config: CompilerConfiguration,
     identifier_indexes: RefCell<HashMap<SourcePath, IdentifierIndex>>,
+    reference_result: RefCell<Option<ReferenceResult>>,
+}
+
+struct ReferenceResult {
+    revision: u64,
+    source: SourceFile,
+    range: i_slint_compiler::parser::TextRange,
+    include_declaration: bool,
+    format: crate::ByteFormat,
+    locations: Vec<lsp_types::Location>,
 }
 
 struct IdentifierIndex {
@@ -146,6 +156,7 @@ impl DocumentCache {
             format,
             config,
             identifier_indexes: Default::default(),
+            reference_result: Default::default(),
         }
     }
 
@@ -177,6 +188,7 @@ impl DocumentCache {
             format,
             config,
             identifier_indexes: Default::default(),
+            reference_result: Default::default(),
         }
     }
 
@@ -199,6 +211,40 @@ impl DocumentCache {
             .into_iter()
             .filter_map(|offset| document.token_at_offset(offset).right_biased())
             .collect()
+    }
+
+    pub fn cached_references(
+        &self,
+        declaration: &i_slint_compiler::parser::SyntaxNode,
+        include_declaration: bool,
+    ) -> Option<Vec<lsp_types::Location>> {
+        self.reference_result
+            .borrow()
+            .as_ref()
+            .filter(|cached| {
+                cached.revision == self.revision()
+                    && Arc::ptr_eq(&cached.source, &declaration.source_file)
+                    && cached.range == declaration.text_range()
+                    && cached.include_declaration == include_declaration
+                    && cached.format == self.format
+            })
+            .map(|cached| cached.locations.clone())
+    }
+
+    pub fn cache_references(
+        &self,
+        declaration: &i_slint_compiler::parser::SyntaxNode,
+        include_declaration: bool,
+        locations: &[lsp_types::Location],
+    ) {
+        *self.reference_result.borrow_mut() = Some(ReferenceResult {
+            revision: self.revision(),
+            source: declaration.source_file.clone(),
+            range: declaration.text_range(),
+            include_declaration,
+            format: self.format,
+            locations: locations.to_vec(),
+        });
     }
 
     pub fn snapshot(&self) -> Option<Self> {
@@ -308,6 +354,7 @@ impl DocumentCache {
 
     fn invalidate_everything(&mut self) {
         self.identifier_indexes.borrow_mut().clear();
+        *self.reference_result.get_mut() = None;
         let all_files = self.type_loader.all_files().cloned().collect::<Vec<_>>();
 
         for path in all_files {
@@ -370,6 +417,7 @@ impl DocumentCache {
         content: String,
         diag: &mut BuildDiagnostics,
     ) -> Result<()> {
+        *self.reference_result.get_mut() = None;
         let path = SourcePath::from_url(url);
         self.type_loader.load_file(&path, content, false, diag).await;
         self.source_file_versions.borrow_mut().insert(path, version);
@@ -377,7 +425,11 @@ impl DocumentCache {
     }
 
     pub async fn reload_cached_file(&mut self, url: &Url, diag: &mut BuildDiagnostics) {
+        let revision = self.revision();
         self.type_loader.reload_cached_file(&SourcePath::from_url(url), diag).await;
+        if revision != self.revision() {
+            *self.reference_result.get_mut() = None;
+        }
     }
 
     /// Drop a document from the cache.
@@ -386,6 +438,7 @@ impl DocumentCache {
     /// Compared to [Self::invalidate_url], this actually causes the document to be reloaded from
     /// disk, not just reparse.
     pub fn drop_document(&mut self, url: &Url) -> Result<HashSet<Url>> {
+        *self.reference_result.get_mut() = None;
         let path = SourcePath::from_url(url);
         self.identifier_indexes.borrow_mut().remove(&path);
         self.source_file_versions.borrow_mut().remove(&path);
@@ -398,6 +451,7 @@ impl DocumentCache {
     /// Compared to [Self::drop_document], the CST remains in the cache, and only the type
     /// information is dropped from the cache, which causes the document to be re-analyzed.
     pub fn invalidate_url(&mut self, url: &Url) -> HashSet<Url> {
+        *self.reference_result.get_mut() = None;
         self.type_loader
             .invalidate_document(&SourcePath::from_url(url))
             .into_iter()
