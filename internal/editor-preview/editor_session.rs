@@ -638,38 +638,28 @@ impl EditorSession {
         &mut self,
         url: &Url,
     ) -> crate::Result<VersionedDiagnostics> {
-        let mut initial_error = None;
-        let (path, state) = match self.discover_project_file_for_document_url(url).await? {
+        let (path, state, error) = match self.discover_project_file_for_document_url(url).await? {
             DiscoveredProjectFile::None => return Ok(Default::default()),
-            DiscoveredProjectFile::File { path, state } => (path, Some(state)),
+            DiscoveredProjectFile::File { path, state } => (path, Some(state), None),
             DiscoveredProjectFile::Invalid { path, state, error } => {
-                if !self.active_project_file_paths().any(|known| known == path) {
-                    initial_error = Some(error);
-                } else {
-                    tracing::warn!(
-                        "Failed to reload project file {} for {url}: {error}",
-                        path.display()
-                    );
-                }
-                (path, state)
+                tracing::warn!("Failed to load project file {} for {url}: {error}", path.display());
+                (path, state, Some(error))
             }
         };
         let contents_changed = self.active_projects.get(&path) != state.as_ref();
+        let report_diagnostics = contents_changed || (error.is_some() && state.is_none());
+        let version = state.as_ref().and_then(|state| state.version);
         let project_url = SourcePath::new(&path).to_url();
         let settings_changed = self.store_project_file(path, state);
-        if (contents_changed || initial_error.is_some())
-            && let Some(url) = project_url
-        {
-            self.send_to_previews(&self.project_file_contents_message(url));
-        }
-        if let Some(error) = initial_error {
-            return Err(error);
+        let mut diagnostics = Vec::new();
+        if report_diagnostics && let Some(url) = project_url {
+            self.send_to_previews(&self.project_file_contents_message(url.clone()));
+            diagnostics.push(Self::project_file_diagnostics(url, version, error));
         }
         if settings_changed {
-            self.reapply_effective_configuration().await
-        } else {
-            Ok(Default::default())
+            diagnostics.extend(self.reapply_effective_configuration().await?);
         }
+        Ok(diagnostics)
     }
 
     pub fn project_main_urls(&self) -> impl Iterator<Item = Url> + '_ {
@@ -732,20 +722,40 @@ impl EditorSession {
         version: SourceFileVersion,
     ) -> crate::Result<VersionedDiagnostics> {
         let (state, error) = ProjectFileState::from_contents(&path, contents, version).await;
-        if let Some(error) = error {
+        if let Some(error) = &error {
             tracing::warn!("Failed to parse project file {}: {error}", path.display());
         }
         let url = SourcePath::new(&path).to_url();
         let settings_changed = self.store_project_file(path, Some(state));
+        if let Some(url) = &url {
+            self.send_to_previews(&self.project_file_contents_message(url.clone()));
+        }
+        let mut diagnostics = if settings_changed {
+            let diagnostics = self.reapply_effective_configuration().await?;
+            self.enqueue_configuration_recompile();
+            diagnostics
+        } else {
+            Default::default()
+        };
         if let Some(url) = url {
-            self.send_to_previews(&self.project_file_contents_message(url));
+            diagnostics.push(Self::project_file_diagnostics(url, version, error));
         }
-        if !settings_changed {
-            return Ok(Default::default());
-        }
-        let diagnostics = self.reapply_effective_configuration().await?;
-        self.enqueue_configuration_recompile();
         Ok(diagnostics)
+    }
+
+    fn project_file_diagnostics(
+        url: Url,
+        version: SourceFileVersion,
+        error: Option<Box<dyn std::error::Error>>,
+    ) -> (Url, SourceFileVersion, Vec<lsp_types::Diagnostic>) {
+        let diagnostics = error
+            .into_iter()
+            .map(|error| lsp_types::Diagnostic {
+                severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                ..lsp_types::Diagnostic::new_simple(Default::default(), error.to_string())
+            })
+            .collect();
+        (url, version, diagnostics)
     }
 
     async fn reload_active_project_file(
@@ -3298,15 +3308,48 @@ mod tests {
     }
 
     #[test]
-    fn invalid_initial_project_file_prevents_document_load() {
+    fn invalid_initial_project_file_preserves_document_analysis() {
         let temp = TempDir::new().unwrap();
         let project_path = temp.path().join(FILE_NAME);
         let document_path = temp.path().join("main.slint");
-        std::fs::write(&project_path, "{").unwrap();
         write_document(&document_path);
 
         let mut session = session();
-        assert!(load_document(&mut session, &document_path).is_err());
+        let document_url = Url::from_file_path(&document_path).unwrap();
+        let project_url = Url::from_file_path(&project_path).unwrap();
+        for contents in ["{", "{}"] {
+            std::fs::write(&project_path, contents).unwrap();
+            for version in [1, 2] {
+                let diagnostics = spin_on::spin_on(session.load_document(
+                    std::fs::read_to_string(&document_path).unwrap(),
+                    document_url.clone(),
+                    Some(version),
+                ))
+                .unwrap();
+                assert!(session.document_cache.get_document(&document_url).is_some());
+                if version == 1 {
+                    let errors =
+                        &diagnostics.iter().find(|(url, _, _)| url == &project_url).unwrap().2;
+                    assert_eq!(errors.len(), 1);
+                    assert_eq!(errors[0].severity, Some(lsp_types::DiagnosticSeverity::ERROR));
+                }
+            }
+        }
+        let diagnostics =
+            spin_on::spin_on(session.load_document("{}".into(), project_url.clone(), Some(3)))
+                .unwrap();
+        assert!(diagnostics.iter().any(|(url, version, diagnostics)| {
+            url == &project_url && *version == Some(3) && diagnostics.len() == 1
+        }));
+        let diagnostics = spin_on::spin_on(session.load_document(
+            r#"{ "slint-edition": "1.19" }"#.into(),
+            project_url.clone(),
+            Some(4),
+        ))
+        .unwrap();
+        assert!(diagnostics.iter().any(|(url, version, diagnostics)| {
+            url == &project_url && *version == Some(4) && diagnostics.is_empty()
+        }));
         assert_eq!(session.active_project_file_paths().next(), Some(project_path.as_path()));
     }
 
