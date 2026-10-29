@@ -764,7 +764,7 @@ impl DeclarationNodeQuery {
 
         let node = token.parent();
 
-        fn property_parent(
+        fn member_parent(
             document_cache: &crate::DocumentCache,
             node: &SyntaxNode,
         ) -> Option<TokenInformation> {
@@ -789,7 +789,9 @@ impl DeclarationNodeQuery {
         let parent_node = node.parent()?;
 
         let parent_query = match parent_node.kind() {
-            SyntaxKind::PropertyDeclaration => property_parent(document_cache, &parent_node),
+            SyntaxKind::PropertyDeclaration
+            | SyntaxKind::CallbackDeclaration
+            | SyntaxKind::Function => member_parent(document_cache, &parent_node),
             _ => None,
         };
 
@@ -851,73 +853,24 @@ impl DeclarationNodeQuery {
                 query: self,
             }),
             _ => {
-                fn find_declared_identifier_in_element(
-                    query: &DeclarationNodeQuery,
-                    element: &syntax_nodes::Element,
-                ) -> Option<syntax_nodes::DeclaredIdentifier> {
-                    for prop in element.PropertyDeclaration() {
-                        let identifier = prop.DeclaredIdentifier();
-                        if i_slint_compiler::parser::identifier_text(&identifier).as_ref()
-                            == Some(&query.token_info.name)
-                        {
-                            return Some(identifier);
-                        }
-                    }
-                    for c in element.CallbackDeclaration() {
-                        let identifier = c.DeclaredIdentifier();
-                        if i_slint_compiler::parser::identifier_text(&identifier).as_ref()
-                            == Some(&query.token_info.name)
-                        {
-                            return Some(identifier);
-                        }
-                    }
-                    for f in element.Function() {
-                        let identifier = f.DeclaredIdentifier();
-                        if i_slint_compiler::parser::identifier_text(&identifier).as_ref()
-                            == Some(&query.token_info.name)
-                        {
-                            return Some(identifier);
-                        }
-                    }
-
-                    None
-                }
-
-                let declared_identifier = match &self.token_info.info {
-                    crate::token_info::TokenInfo::NamedReference(nr) => {
+                let declaration = match &self.token_info.info {
+                    crate::token_info::TokenInfo::NamedReference(nr)
                         if i_slint_compiler::parser::normalize_identifier(nr.name())
-                            == self.token_info.name
-                        {
-                            nr.element()
-                                .borrow()
-                                .debug
-                                .iter()
-                                .filter_map(|di| {
-                                    find_declared_identifier_in_element(&self, &di.node)
-                                })
-                                .next()
-                        } else {
-                            None
-                        }
+                            == self.token_info.name =>
+                    {
+                        self.token_info.info.declaration(document_cache)
                     }
-                    crate::token_info::TokenInfo::IncompleteNamedReference(element_type, name) => {
-                        if name == &self.token_info.name {
-                            match &element_type {
-                                i_slint_compiler::element_type::ElementType::Component(
-                                    component,
-                                ) => find_declared_identifier_in_element(
-                                    &self,
-                                    &component.node.as_ref()?.Element(),
-                                ),
-                                _ => None,
-                            }
-                        } else {
-                            None
-                        }
+                    crate::token_info::TokenInfo::IncompleteNamedReference(_, name)
+                        if name == &self.token_info.name =>
+                    {
+                        self.token_info.info.declaration(document_cache)
                     }
                     _ => None,
                 };
-                if let Some(declared_identifier) = declared_identifier {
+                if let Some(declared_identifier) = declaration
+                    .and_then(|node| node.child_node(SyntaxKind::DeclaredIdentifier))
+                    .map(syntax_nodes::DeclaredIdentifier::from)
+                {
                     let token = main_identifier(&declared_identifier)?;
 
                     return Some(DeclarationNode {
@@ -3663,6 +3616,70 @@ export component Bar {
         assert!(edited_text[0].contents.contains("export component Bar {"));
         assert!(edited_text[0].contents.contains("<int> XxxYyyZzz /* <- TEST_ME_1 */: 42;"));
         assert!(edited_text[0].contents.contains("usage: id.XxxYyyZzz /* <- TEST_ME_2 */;"));
+    }
+
+    #[test]
+    fn test_rename_exported_members() {
+        i_slint_backend_testing::init_no_event_loop();
+        for (declaration, inherited_use, global_use) in [
+            (
+                "callback fired_now /* <- TEST_ME_DECL */;",
+                "fired-now /* <- TEST_ME_USE */ => { self.fired-now(); }",
+                "init => { Local.fired-now /* <- TEST_ME_USE */(); }",
+            ),
+            (
+                "public function fired_now /* <- TEST_ME_DECL */() {}",
+                "init => { self.fired-now /* <- TEST_ME_USE */(); }",
+                "init => { Local.fired-now /* <- TEST_ME_USE */(); }",
+            ),
+            (
+                "in-out property <int> fired_now /* <- TEST_ME_DECL */: 0;",
+                "fired-now /* <- TEST_ME_USE */: 1;",
+                "x: Local.fired-now /* <- TEST_ME_USE */ * 1px;",
+            ),
+        ] {
+            for (owner, usage) in [("component", inherited_use), ("global", global_use)] {
+                let source_path = test::test_file_name("source.slint");
+                let main_path = test::main_test_file_name();
+                let source = format!("export {owner} Base {{ {declaration} }}");
+                let inheritance = if owner == "component" { "inherits Local" } else { "" };
+                let main = format!(
+                    r#"
+import {{ Public as Local }} from "bridge.slint";
+export component Other {{ callback fired_now; fired_now => {{}} }}
+export component App {inheritance} {{
+    {usage}
+}}
+"#
+                );
+                let document_cache = test::recompile_test_with_sources(
+                    "fluent",
+                    HashMap::from([
+                        (main_path.to_url().unwrap(), main.clone()),
+                        (source_path.to_url().unwrap(), source.clone()),
+                        (
+                            test::test_file_name("bridge.slint").to_url().unwrap(),
+                            "export { Base as Public } from \"source.slint\";".into(),
+                        ),
+                    ]),
+                    false,
+                    Default::default(),
+                );
+
+                for (path, suffix) in [(&source_path, "_DECL"), (&main_path, "_USE")] {
+                    let edited = rename_tester(&document_cache, path, suffix);
+                    assert_eq!(edited.len(), 2, "{owner}: {declaration}");
+                    for edit in edited {
+                        if SourcePath::from_url(&edit.url) == source_path {
+                            assert_eq!(edit.contents, source.replace("fired_now", "XxxYyyZzz"));
+                        } else {
+                            assert_eq!(SourcePath::from_url(&edit.url), main_path);
+                            assert_eq!(edit.contents, main.replace("fired-now", "XxxYyyZzz"));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
