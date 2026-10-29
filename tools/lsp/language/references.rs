@@ -6,7 +6,7 @@ use i_slint_compiler::parser::{SyntaxKind, SyntaxToken};
 use lsp_types::Location;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn load_workspace(ctx: &mut super::Context) {
+pub async fn load_workspace(ctx: &mut super::Context) -> Result<(), super::LspError> {
     use i_slint_compiler::diagnostics::BuildDiagnostics;
     use std::collections::{HashMap, HashSet};
 
@@ -15,7 +15,7 @@ pub async fn load_workspace(ctx: &mut super::Context) {
         .filter_map(|folder| folder.uri.to_file_path().ok())
         .collect();
     if roots.is_empty() {
-        return;
+        return Ok(());
     }
     let dc = &mut ctx.session.document_cache;
     let cached: HashMap<_, _> = dc
@@ -45,13 +45,21 @@ pub async fn load_workspace(ctx: &mut super::Context) {
             }
             let entries = match std::fs::read_dir(&directory) {
                 Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(error) => {
-                    tracing::debug!("Cannot scan {}: {error}", directory.display());
-                    continue;
+                    return Err(format!("Cannot scan {}: {error}", directory.display()));
                 }
             };
-            for entry in entries.flatten() {
-                let Ok(kind) = entry.file_type() else { continue };
+            for entry in entries {
+                let entry = entry
+                    .map_err(|error| format!("Cannot scan {}: {error}", directory.display()))?;
+                let kind = match entry.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => {
+                        return Err(format!("Cannot inspect {}: {error}", entry.path().display()));
+                    }
+                };
                 let path = entry.path();
                 if kind.is_dir() {
                     if !matches!(
@@ -65,34 +73,32 @@ pub async fn load_workspace(ctx: &mut super::Context) {
                 }
             }
         }
-        files
-            .into_iter()
-            .filter_map(|path| {
-                let url = lsp_types::Url::from_file_path(&path).ok()?;
-                if open.contains(&url) {
-                    return None;
-                }
-                let source = match std::fs::read_to_string(&path) {
-                    Ok(source) => Some(source),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(error) => {
-                        tracing::debug!("Cannot read {}: {error}", path.display());
-                        return None;
-                    }
-                };
-                let previous = cached.get(&url).map(|file| file.source().unwrap_or_default());
-                (source.as_deref() != previous).then_some((url, source))
-            })
-            .collect::<Vec<_>>()
+        let mut sources = Vec::new();
+        for path in files {
+            let url = lsp_types::Url::from_file_path(&path)
+                .map_err(|()| format!("Cannot represent {} as a URL", path.display()))?;
+            if open.contains(&url) {
+                continue;
+            }
+            let source = match std::fs::read_to_string(&path) {
+                Ok(source) => Some(source),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(format!("Cannot read {}: {error}", path.display())),
+            };
+            let previous = cached.get(&url).map(|file| file.source().unwrap_or_default());
+            if source.as_deref() != previous {
+                sources.push((url, source));
+            }
+        }
+        Ok(sources)
     })
     .await;
-    let sources = match sources {
-        Ok(sources) => sources,
-        Err(error) => {
-            tracing::error!("Workspace reference scan failed: {error}");
-            return;
+    let sources = sources.map_err(|error| error.to_string()).flatten().map_err(|message| {
+        super::LspError {
+            code: super::LspErrorCode::RequestFailed,
+            message: format!("Workspace reference scan failed: {message}"),
         }
-    };
+    })?;
     for (url, _) in &sources {
         if let Err(error) = dc.drop_document(url) {
             tracing::debug!("Cannot invalidate {url}: {error}");
@@ -111,6 +117,7 @@ pub async fn load_workspace(ctx: &mut super::Context) {
     for url in cached_urls {
         dc.reload_cached_file(&url, &mut BuildDiagnostics::default()).await;
     }
+    Ok(())
 }
 
 pub fn references(
@@ -213,6 +220,54 @@ mod tests {
         .await
         .unwrap();
         serde_json::from_value(result).unwrap()
+    }
+
+    #[tokio::test]
+    async fn unreadable_sources_fail_references_and_rename() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_path = temp.path().join("base.slint");
+        let base = Url::from_file_path(&base_path).unwrap();
+        let source = "export component Base { in-out property <int> value; }";
+        std::fs::write(&base_path, source).unwrap();
+        let consumer_path = temp.path().join("consumer.slint");
+        let consumer = Url::from_file_path(&consumer_path).unwrap();
+        let usage =
+            "import { Base } from \"base.slint\"; component Consumer inherits Base { value: 1; }";
+        std::fs::write(&consumer_path, usage).unwrap();
+        let mut ctx = test::mock_context();
+        ctx.init_param.workspace_folders = Some(vec![lsp_types::WorkspaceFolder {
+            uri: Url::from_directory_path(temp.path()).unwrap(),
+            name: "test".into(),
+        }]);
+        ctx.session.open_document(source.into(), base.clone(), Some(1)).await.unwrap();
+        assert_eq!(request(&mut ctx, &base, source, "value;", true).await.len(), 2);
+
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(usage.encode_utf16().flat_map(u16::to_le_bytes));
+        std::fs::write(&consumer_path, utf16).unwrap();
+        let mut handlers = crate::language::RequestHandler::default();
+        crate::language::register_request_handlers(&mut handlers);
+        for method in ["textDocument/references", "textDocument/rename"] {
+            let error = handlers.0[method](
+                serde_json::json!({
+                    "textDocument": { "uri": base },
+                    "position": { "line": 0, "character": source.find("value;").unwrap() },
+                    "context": { "includeDeclaration": true },
+                    "newName": "renamed-value",
+                }),
+                &mut ctx,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error.code, crate::language::LspErrorCode::RequestFailed));
+            assert!(error.message.contains("consumer.slint"));
+            assert!(error.message.contains("UTF-8"));
+        }
+        ctx.session.open_document(usage.into(), consumer.clone(), Some(2)).await.unwrap();
+        assert_eq!(request(&mut ctx, &base, source, "value;", true).await.len(), 2);
+        ctx.session.close_document(consumer).await.unwrap();
+        std::fs::write(&consumer_path, usage).unwrap();
+        assert_eq!(request(&mut ctx, &base, source, "value;", true).await.len(), 2);
     }
 
     #[tokio::test]

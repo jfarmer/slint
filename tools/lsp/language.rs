@@ -462,7 +462,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
     rh.register_async::<References>(|params, ctx| {
         Box::pin(async move {
             #[cfg(not(target_arch = "wasm32"))]
-            references::load_workspace(ctx).await;
+            references::load_workspace(ctx).await?;
             Ok(token_descr(
                 &ctx.session.document_cache,
                 &params.text_document_position.text_document.uri,
@@ -640,7 +640,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
             let target_is_open = ctx.session.open_urls.contains(&uri);
             #[cfg(not(target_arch = "wasm32"))]
             if !target_is_open {
-                references::load_workspace(ctx).await;
+                references::load_workspace(ctx).await?;
             }
             if let Some((tk, _off)) = token_descr(
                 &ctx.session.document_cache,
@@ -670,7 +670,7 @@ pub fn register_request_handlers(rh: &mut RequestHandler) {
             }
             #[cfg(not(target_arch = "wasm32"))]
             if target_is_open {
-                references::load_workspace(ctx).await;
+                references::load_workspace(ctx).await?;
             }
             if let Some((tk, _off)) = token_descr(
                 &ctx.session.document_cache,
