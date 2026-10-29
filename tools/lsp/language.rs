@@ -9,6 +9,7 @@ mod documentation;
 mod formatting;
 mod goto;
 mod hover;
+mod implementation;
 mod references;
 mod semantic_tokens;
 mod signature_help;
@@ -47,7 +48,7 @@ use lsp_types::{
     request::{
         CodeActionRequest, CodeLensRequest, ColorPresentationRequest, Completion, DocumentColor,
         DocumentHighlightRequest, DocumentSymbolRequest, ExecuteCommand, Formatting,
-        GotoDefinition, HoverRequest, PrepareRenameRequest, References, Rename,
+        GotoDefinition, GotoImplementation, HoverRequest, PrepareRenameRequest, References, Rename,
         SemanticTokensFullRequest, SignatureHelpRequest,
     },
 };
@@ -408,6 +409,9 @@ pub fn server_initialize_result(client_cap: &ClientCapabilities) -> InitializeRe
                 completion_item: None,
             }),
             definition_provider: Some(OneOf::Left(true)),
+            implementation_provider: Some(lsp_types::ImplementationProviderCapability::Simple(
+                true,
+            )),
             text_document_sync: Some(TextDocumentSyncCapability::Kind(
                 lsp_types::TextDocumentSyncKind::FULL,
             )),
@@ -461,6 +465,21 @@ pub fn server_initialize_result(client_cap: &ClientCapabilities) -> InitializeRe
 }
 
 pub fn register_request_handlers(rh: &mut RequestHandler) {
+    rh.register_async::<GotoImplementation>(|params, ctx| {
+        Box::pin(async move {
+            #[cfg(not(target_arch = "wasm32"))]
+            workspace::load(ctx).await?;
+            Ok(token_descr(
+                &ctx.session.document_cache,
+                &params.text_document_position_params.text_document.uri,
+                &params.text_document_position_params.position,
+            )
+            .and_then(|(token, _)| {
+                implementation::implementations(&ctx.session.document_cache, token)
+            })
+            .map(lsp_types::GotoDefinitionResponse::Array))
+        })
+    });
     rh.register_async::<References>(|params, ctx| {
         Box::pin(async move {
             #[cfg(not(target_arch = "wasm32"))]

@@ -91,7 +91,7 @@ pub async fn load(ctx: &mut super::Context) -> Result<(), super::LspError> {
     let sources = sources.map_err(|error| error.to_string()).flatten().map_err(|message| {
         super::LspError {
             code: super::LspErrorCode::RequestFailed,
-            message: format!("Workspace reference scan failed: {message}"),
+            message: format!("Workspace scan failed: {message}"),
         }
     })?;
     for (url, _) in &sources {

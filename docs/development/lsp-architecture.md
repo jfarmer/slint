@@ -13,6 +13,7 @@ The Slint LSP (Language Server Protocol) server provides IDE features for `.slin
 - **Code completion** - Property, element, type suggestions
 - **Hover** - Type information and documentation
 - **Go-to-definition** - Navigate to declarations
+- **Go-to-implementation** - Find derived component declarations
 - **References** - Find source references across the workspace
 - **Semantic tokens** - Syntax highlighting
 - **Document symbols** - Outline view
@@ -29,6 +30,8 @@ The Slint LSP (Language Server Protocol) server provides IDE features for `.slin
 | `tools/lsp/language.rs` | LSP request handlers, server capabilities |
 | `tools/lsp/language/completion.rs` | Code completion logic |
 | `tools/lsp/language/goto.rs` | Go-to-definition |
+| `tools/lsp/language/implementation.rs` | Derived component lookup |
+| `tools/lsp/language/workspace.rs` | Native workspace discovery and source refresh |
 | `tools/lsp/language/hover.rs` | Hover information |
 | `tools/lsp/language/semantic_tokens.rs` | Syntax highlighting |
 | `tools/lsp/language/signature_help.rs` | Function/callback signatures |
@@ -177,6 +180,15 @@ Workspace discovery and content comparisons run before consulting this cache.
 The WebAssembly server searches documents supplied by its host and their loaded imports.
 It doesn't enumerate the host's filesystem.
 The current request loop processes requests serially and doesn't cancel reference searches or stream partial results.
+
+## Implementations
+
+`textDocument/implementation` resolves component types through the same token classification as go-to-definition.
+It returns direct and transitive derived component declarations, with locations selecting their identifiers.
+Use references to find element instances.
+Experimental interface implementations are not handled.
+The native server refreshes the workspace using the loader shared with references and rename.
+The WebAssembly server searches supplied documents and loaded imports.
 
 ## Rename
 
