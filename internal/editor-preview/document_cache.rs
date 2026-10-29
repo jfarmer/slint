@@ -1,9 +1,9 @@
 // Copyright © SixtyFPS GmbH <info@slint.dev>
 // SPDX-License-Identifier: GPL-3.0-only OR LicenseRef-Slint-Royalty-free-2.0 OR LicenseRef-Slint-Software-3.0
 
-use i_slint_compiler::diagnostics::{BuildDiagnostics, SourceFile};
+use i_slint_compiler::diagnostics::{BuildDiagnostics, SourceFile, SourceFileInner};
 use i_slint_compiler::object_tree::Document;
-use i_slint_compiler::parser::{TextSize, syntax_nodes};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxToken, TextSize, syntax_nodes};
 use i_slint_compiler::source_path::SourcePath;
 use i_slint_compiler::typeloader::TypeLoader;
 use i_slint_compiler::typeregister::TypeRegister;
@@ -14,6 +14,7 @@ use std::{cell::RefCell, collections::HashMap, future::Future, path::PathBuf, pi
 
 use crate::{ElementRcNode, Result};
 use std::collections::HashSet;
+use std::sync::{Arc, Weak};
 
 pub type SourceFileVersionMap = HashMap<SourcePath, SourceFileVersion>;
 
@@ -59,6 +60,29 @@ pub struct DocumentCache {
     source_file_versions: Rc<RefCell<SourceFileVersionMap>>,
     pub format: crate::ByteFormat,
     config: CompilerConfiguration,
+    identifier_indexes: RefCell<HashMap<SourcePath, IdentifierIndex>>,
+}
+
+struct IdentifierIndex {
+    source: Weak<SourceFileInner>,
+    offsets: HashMap<smol_str::SmolStr, Vec<TextSize>>,
+}
+
+impl IdentifierIndex {
+    fn new(document: &syntax_nodes::Document) -> Self {
+        let mut offsets: HashMap<_, Vec<_>> = HashMap::new();
+        let mut token = document.first_token();
+        while let Some(current) = token {
+            token = current.next_token();
+            if current.kind() == SyntaxKind::Identifier {
+                offsets
+                    .entry(i_slint_compiler::parser::normalize_identifier(current.text()))
+                    .or_default()
+                    .push(current.text_range().start());
+            }
+        }
+        Self { source: Arc::downgrade(&document.source_file), offsets }
+    }
 }
 
 #[cfg(feature = "preview-engine")]
@@ -121,6 +145,7 @@ impl DocumentCache {
             source_file_versions,
             format,
             config,
+            identifier_indexes: Default::default(),
         }
     }
 
@@ -145,7 +170,35 @@ impl DocumentCache {
             source_file_versions,
         );
 
-        Self { type_loader, open_import_callback, source_file_versions, format, config }
+        Self {
+            type_loader,
+            open_import_callback,
+            source_file_versions,
+            format,
+            config,
+            identifier_indexes: Default::default(),
+        }
+    }
+
+    pub(crate) fn identifier_tokens(
+        &self,
+        document: &syntax_nodes::Document,
+        names: &HashSet<smol_str::SmolStr>,
+    ) -> Vec<SyntaxToken> {
+        let mut indexes = self.identifier_indexes.borrow_mut();
+        let index = indexes
+            .entry(document.source_file.path().clone())
+            .or_insert_with(|| IdentifierIndex::new(document));
+        if !index.source.ptr_eq(&Arc::downgrade(&document.source_file)) {
+            *index = IdentifierIndex::new(document);
+        }
+        let mut offsets: Vec<_> =
+            names.iter().filter_map(|name| index.offsets.get(name)).flatten().copied().collect();
+        offsets.sort_unstable();
+        offsets
+            .into_iter()
+            .filter_map(|offset| document.token_at_offset(offset).right_biased())
+            .collect()
     }
 
     pub fn snapshot(&self) -> Option<Self> {
@@ -254,6 +307,7 @@ impl DocumentCache {
     }
 
     fn invalidate_everything(&mut self) {
+        self.identifier_indexes.borrow_mut().clear();
         let all_files = self.type_loader.all_files().cloned().collect::<Vec<_>>();
 
         for path in all_files {
@@ -333,6 +387,7 @@ impl DocumentCache {
     /// disk, not just reparse.
     pub fn drop_document(&mut self, url: &Url) -> Result<HashSet<Url>> {
         let path = SourcePath::from_url(url);
+        self.identifier_indexes.borrow_mut().remove(&path);
         self.source_file_versions.borrow_mut().remove(&path);
         Ok(self.type_loader.drop_document(&path)?.iter().filter_map(|path| path.to_url()).collect())
     }
@@ -472,6 +527,41 @@ mod tests {
     use crate::test::complex_document_cache;
 
     use super::*;
+
+    #[test]
+    fn identifier_index_tracks_source_versions() {
+        let mut cache = DocumentCache::new(Default::default());
+        let url = Url::parse("file:///identifier-index.slint").unwrap();
+        let path = SourcePath::from_url(&url);
+        let parse = |text: &str| -> syntax_nodes::Document {
+            i_slint_compiler::parser::parse(
+                text.into(),
+                Some(path.clone()),
+                &mut BuildDiagnostics::default(),
+            )
+            .into()
+        };
+        let old = parse("component App { property <int> value-name: value_name; }");
+        let names = HashSet::from(["App".into(), "value-name".into()]);
+        let tokens = cache.identifier_tokens(&old, &names);
+        assert_eq!(
+            tokens.iter().map(|token| token.text()).collect::<Vec<_>>(),
+            ["App", "value-name", "value_name"]
+        );
+        let source = "/* value-name */ component App { property <int> value_name: 42; property <string> s: \"value-name\"; }";
+        let new = parse(source);
+        let tokens = cache.identifier_tokens(&new, &names);
+        assert_eq!(
+            tokens.iter().map(|token| token.text()).collect::<Vec<_>>(),
+            ["App", "value_name"]
+        );
+        assert_eq!(
+            u32::from(tokens[1].text_range().start()) as usize,
+            source.find("value_name").unwrap()
+        );
+        cache.drop_document(&url).unwrap();
+        assert!(cache.identifier_indexes.borrow().is_empty());
+    }
 
     fn id_at_position(dc: &DocumentCache, url: &Url, line: u32, character: u32) -> Option<String> {
         let result = dc.element_at_position(url, &lsp_types::Position { line, character })?;

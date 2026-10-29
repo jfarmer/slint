@@ -560,19 +560,14 @@ pub fn symbol_occurrences(
             }
         }
     }
-    let mut occurrences = Vec::new();
-    let mut token = document.first_token();
-    while let Some(current) = token {
-        token = current.next_token();
-        if current.kind() == SyntaxKind::Identifier
-            && names.contains(&i_slint_compiler::parser::normalize_identifier(current.text()))
-            && let Some(info) = token_info(document_cache, current.clone())
-            && symbol.is_same_symbol(document_cache, Some(declaration), &info)
-        {
-            occurrences.push(current);
-        }
-    }
-    occurrences
+    document_cache
+        .identifier_tokens(document, &names)
+        .into_iter()
+        .filter(|current| {
+            token_info(document_cache, current.clone())
+                .is_some_and(|info| symbol.is_same_symbol(document_cache, Some(declaration), &info))
+        })
+        .collect()
 }
 
 /// Try to lookup the property `prop_name` in the base of the given Element
