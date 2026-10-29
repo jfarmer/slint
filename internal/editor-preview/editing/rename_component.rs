@@ -545,6 +545,8 @@ fn rename_export_name(
 #[derive(Clone, Debug)]
 pub enum DeclarationNodeKind {
     DeclaredIdentifier(syntax_nodes::DeclaredIdentifier),
+    StructField(syntax_nodes::ObjectTypeMember),
+    EnumValue(syntax_nodes::EnumValue),
     InternalName(syntax_nodes::InternalName),
     ExportName(syntax_nodes::ExportName),
 }
@@ -575,6 +577,12 @@ impl DeclarationNode {
         match &self.kind {
             DeclarationNodeKind::DeclaredIdentifier(id) => {
                 rename_declared_identifier(document_cache, &self.query, id, new_type)
+            }
+            DeclarationNodeKind::StructField(field) => {
+                rename_data_member(document_cache, &self.query, field, new_type)
+            }
+            DeclarationNodeKind::EnumValue(value) => {
+                rename_data_member(document_cache, &self.query, value, new_type)
             }
             DeclarationNodeKind::InternalName(internal) => {
                 Ok(rename_internal_name(document_cache, &self.query, internal, new_type))
@@ -768,16 +776,17 @@ impl DeclarationNodeQuery {
             document_cache: &crate::DocumentCache,
             node: &SyntaxNode,
         ) -> Option<TokenInformation> {
-            let element = node.parent()?;
-            assert_eq!(element.kind(), SyntaxKind::Element);
-            let component_or_subelement = element.parent()?;
-            assert!(
-                [SyntaxKind::Component, SyntaxKind::SubElement]
-                    .contains(&component_or_subelement.kind())
-            );
-
-            let declared_identifier =
-                component_or_subelement.child_node(SyntaxKind::DeclaredIdentifier)?;
+            let owner =
+                std::iter::successors(node.parent(), |node| node.parent()).find(|node| {
+                    matches!(
+                        node.kind(),
+                        SyntaxKind::Component
+                            | SyntaxKind::SubElement
+                            | SyntaxKind::StructDeclaration
+                            | SyntaxKind::EnumDeclaration
+                    )
+                })?;
+            let declared_identifier = owner.child_node(SyntaxKind::DeclaredIdentifier)?;
 
             let token = main_identifier(&declared_identifier)?;
             let info = crate::token_info::token_info(document_cache, token.clone())?;
@@ -786,12 +795,19 @@ impl DeclarationNodeQuery {
             Some(TokenInformation { info, name, token })
         }
 
-        let parent_node = node.parent()?;
+        let parent_node =
+            if matches!(node.kind(), SyntaxKind::ObjectTypeMember | SyntaxKind::EnumValue) {
+                node.clone()
+            } else {
+                node.parent()?
+            };
 
         let parent_query = match parent_node.kind() {
             SyntaxKind::PropertyDeclaration
             | SyntaxKind::CallbackDeclaration
-            | SyntaxKind::Function => member_parent(document_cache, &parent_node),
+            | SyntaxKind::Function
+            | SyntaxKind::ObjectTypeMember
+            | SyntaxKind::EnumValue => member_parent(document_cache, &parent_node),
             _ => None,
         };
 
@@ -844,6 +860,14 @@ impl DeclarationNodeQuery {
                 kind: DeclarationNodeKind::DeclaredIdentifier(node.into()),
                 query: self,
             }),
+            SyntaxKind::ObjectTypeMember => Some(DeclarationNode {
+                kind: DeclarationNodeKind::StructField(node.into()),
+                query: self,
+            }),
+            SyntaxKind::EnumValue => Some(DeclarationNode {
+                kind: DeclarationNodeKind::EnumValue(node.into()),
+                query: self,
+            }),
             SyntaxKind::InternalName => Some(DeclarationNode {
                 kind: DeclarationNodeKind::InternalName(node.into()),
                 query: self,
@@ -865,18 +889,19 @@ impl DeclarationNodeQuery {
                     {
                         self.token_info.info.declaration(document_cache)
                     }
+                    crate::token_info::TokenInfo::StructField(_, _)
+                    | crate::token_info::TokenInfo::EnumerationValue(_) => {
+                        self.token_info.info.declaration(document_cache)
+                    }
                     _ => None,
                 };
-                if let Some(declared_identifier) = declaration
-                    .and_then(|node| node.child_node(SyntaxKind::DeclaredIdentifier))
-                    .map(syntax_nodes::DeclaredIdentifier::from)
-                {
+                if let Some(declared_identifier) = declaration.and_then(|node| match node.kind() {
+                    SyntaxKind::ObjectTypeMember | SyntaxKind::EnumValue => Some(node),
+                    _ => node.child_node(SyntaxKind::DeclaredIdentifier),
+                }) {
                     let token = main_identifier(&declared_identifier)?;
-
-                    return Some(DeclarationNode {
-                        query: DeclarationNodeQuery::new(document_cache, token)?,
-                        kind: DeclarationNodeKind::DeclaredIdentifier(declared_identifier),
-                    });
+                    return DeclarationNodeQuery::new(document_cache, token)?
+                        .find_declaration_node(document_cache);
                 }
 
                 // Find the element/type manually so exports/imports get resolved
@@ -1044,8 +1069,6 @@ fn rename_declared_identifier(
     declared_identifier: &syntax_nodes::DeclaredIdentifier,
     new_type: &str,
 ) -> crate::Result<lsp_types::WorkspaceEdit> {
-    let ti = &query.token_info;
-
     let source_file = &declared_identifier.source_file;
     let document = document_cache
         .get_document_for_source_file(source_file)
@@ -1071,24 +1094,56 @@ fn rename_declared_identifier(
         return Err(format!("{new_type} is already a registered element").into());
     }
 
-    let old_type = &ti.name;
-
-    if *old_type == normalized_new_type {
+    if query.token_info.name == normalized_new_type {
         return Ok(lsp_types::WorkspaceEdit::default());
     }
+    Ok(rename_declaration_occurrences(document_cache, document_node, query, new_type))
+}
 
+fn rename_data_member(
+    document_cache: &crate::DocumentCache,
+    query: &DeclarationNodeQuery,
+    node: &SyntaxNode,
+    new_name: &str,
+) -> crate::Result<lsp_types::WorkspaceEdit> {
+    let normalized = i_slint_compiler::parser::normalize_identifier(new_name);
+    if normalized == query.token_info.name {
+        return Ok(lsp_types::WorkspaceEdit::default());
+    }
+    let collision = match &query.token_info.info {
+        crate::token_info::TokenInfo::StructField(ty, _) => ty.fields.contains_key(&normalized),
+        crate::token_info::TokenInfo::EnumerationValue(value) => {
+            value.enumeration.values.contains(&normalized)
+        }
+        _ => return Err("This declaration is not a struct field or enum value".into()),
+    };
+    if collision {
+        return Err(format!("A member named {new_name} already exists").into());
+    }
+    let document_node = document_cache
+        .get_document_for_source_file(&node.source_file)
+        .and_then(|document| document.node.as_ref())
+        .ok_or("No document found")?;
+    Ok(rename_declaration_occurrences(document_cache, document_node, query, new_name))
+}
+
+fn rename_declaration_occurrences(
+    document_cache: &crate::DocumentCache,
+    document_node: &syntax_nodes::Document,
+    query: &DeclarationNodeQuery,
+    new_name: &str,
+) -> lsp_types::WorkspaceEdit {
     let mut edits = Vec::new();
 
-    // Change all local usages:
-    rename_local_symbols(document_cache, document_node, query, new_type, &mut edits);
+    rename_local_symbols(document_cache, document_node, query, new_name, &mut edits);
 
     if is_symbol_name_exported(document_cache, document_node, query).is_some()
-        && fix_export_lists(document_cache, document_node, query, new_type, &mut edits).is_none()
+        && fix_export_lists(document_cache, document_node, query, new_name, &mut edits).is_none()
     {
-        fix_imports(document_cache, query, source_file.path(), new_type, &mut edits);
+        fix_imports(document_cache, query, document_node.source_file.path(), new_name, &mut edits);
     }
 
-    Ok(crate::editing::create_workspace_edit_from_single_text_edits(edits))
+    crate::editing::create_workspace_edit_from_single_text_edits(edits)
 }
 
 #[cfg(test)]
@@ -3616,6 +3671,75 @@ export component Bar {
         assert!(edited_text[0].contents.contains("export component Bar {"));
         assert!(edited_text[0].contents.contains("<int> XxxYyyZzz /* <- TEST_ME_1 */: 42;"));
         assert!(edited_text[0].contents.contains("usage: id.XxxYyyZzz /* <- TEST_ME_2 */;"));
+    }
+
+    #[test]
+    fn test_rename_data_members_through_aliases() {
+        i_slint_backend_testing::init_no_event_loop();
+        for (source, consumer) in [
+            (
+                "export struct Data { value_member /* <- TEST_ME_DECL */: int, other_member: int }",
+                r#"
+import { Public as Local } from "bridge.slint";
+export struct Unrelated { value_member: int }
+export component App inherits Rectangle {
+    in property <Local> data: { value-member /* <- TEST_ME_USE */: 1, other-member: 2 };
+    x: data.value-member /* <- TEST_ME_SECOND_USE */ * 1px;
+    in property <Unrelated> unrelated: { value_member: 3 };
+}
+"#,
+            ),
+            (
+                "export enum Data { value_member /* <- TEST_ME_DECL */, other_member }",
+                r#"
+import { Public as Local } from "bridge.slint";
+export enum Unrelated { value_member, other }
+export component App {
+    in property <Local> value: Local.value-member /* <- TEST_ME_USE */;
+    in property <Local> again: Local.value-member /* <- TEST_ME_SECOND_USE */;
+    in property <Unrelated> unrelated: Unrelated.value_member;
+}
+"#,
+            ),
+        ] {
+            let source_path = test::test_file_name("source.slint");
+            let main_path = test::main_test_file_name();
+            let document_cache = test::recompile_test_with_sources(
+                "fluent",
+                HashMap::from([
+                    (main_path.to_url().unwrap(), consumer.into()),
+                    (source_path.to_url().unwrap(), source.into()),
+                    (
+                        test::test_file_name("bridge.slint").to_url().unwrap(),
+                        "export { Data as Public } from \"source.slint\";".into(),
+                    ),
+                ]),
+                false,
+                Default::default(),
+            );
+            for (path, suffix) in
+                [(&source_path, "_DECL"), (&main_path, "_USE"), (&main_path, "_SECOND_USE")]
+            {
+                let edited = rename_tester(&document_cache, path, suffix);
+                assert_eq!(edited.len(), 2);
+                for edit in edited {
+                    if SourcePath::from_url(&edit.url) == source_path {
+                        assert_eq!(edit.contents, source.replace("value_member", "XxxYyyZzz"));
+                    } else {
+                        assert_eq!(SourcePath::from_url(&edit.url), main_path);
+                        assert_eq!(edit.contents, consumer.replace("value-member", "XxxYyyZzz"));
+                    }
+                }
+            }
+            let token = find_token_by_comment(&document_cache, &source_path, "_DECL");
+            let declaration = find_declaration_node(&document_cache, &token).unwrap();
+            assert!(declaration.rename(&document_cache, "other-member").is_err());
+            assert_eq!(
+                declaration.rename(&document_cache, "value-member").unwrap(),
+                lsp_types::WorkspaceEdit::default()
+            );
+            assert!(declaration.host_language_classification(&document_cache).is_none());
+        }
     }
 
     #[test]
