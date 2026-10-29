@@ -32,6 +32,7 @@ pub enum TokenInfo {
     StructField(Arc<Struct>, SmolStr),
     /// The model data of a `for`, named by its declared identifier
     ModelData(ElementRc),
+    ModelIndex(ElementRc),
 }
 
 /// Resolve a struct/enum declaration reference to its syntax node using the
@@ -166,10 +167,14 @@ impl TokenInfo {
                     })
                     .map(|m| m.into())
             }
-            TokenInfo::ModelData(elem) => {
-                let node = elem.borrow().debug.first()?.node.clone();
-                let repeated = node.parent()?.parent()?;
-                syntax_nodes::RepeatedElement::new(repeated)?.DeclaredIdentifier().map(|d| d.into())
+            TokenInfo::ModelData(elem) | TokenInfo::ModelIndex(elem) => {
+                let repeated = crate::ElementRcNode::new(elem.clone(), 0)?
+                    .with_decorated_node(syntax_nodes::RepeatedElement::new)?;
+                if matches!(self, TokenInfo::ModelData(_)) {
+                    repeated.DeclaredIdentifier().map(|d| d.into())
+                } else {
+                    repeated.RepeatedIndex().map(|d| d.into())
+                }
             }
             TokenInfo::IncompleteNamedReference(element_type, prop_name) => {
                 let mut element_type = element_type.clone();
@@ -210,6 +215,10 @@ fn token_info_from_lookup_result(lr: LookupResult) -> Option<TokenInfo> {
             expression: Expression::RepeaterModelReference { element },
             ..
         } => Some(TokenInfo::ModelData(element.upgrade()?)),
+        LookupResult::Expression {
+            expression: Expression::RepeaterIndexReference { element },
+            ..
+        } => Some(TokenInfo::ModelIndex(element.upgrade()?)),
         LookupResult::Enumeration(e) => Some(TokenInfo::Type(Type::Enumeration(e))),
         LookupResult::Callable(LookupResultCallable::Callable(
             Callable::Callback(nr) | Callable::Function(nr),
@@ -218,8 +227,23 @@ fn token_info_from_lookup_result(lr: LookupResult) -> Option<TokenInfo> {
     }
 }
 
+fn repeater_binding(document_cache: &crate::DocumentCache, node: &SyntaxNode) -> Option<TokenInfo> {
+    let repeated = syntax_nodes::RepeatedElement::new(node.parent()?)?;
+    let element = repeated.SubElement().Element();
+    let url = element.source_file.path().to_url()?;
+    let element = document_cache.element_at_offset(&url, element.text_range().start())?;
+    Some(if node.kind() == SyntaxKind::RepeatedIndex {
+        TokenInfo::ModelIndex(element.element)
+    } else {
+        TokenInfo::ModelData(element.element)
+    })
+}
+
 pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> Option<TokenInfo> {
     let mut node = token.parent();
+    if node.kind() == SyntaxKind::RepeatedIndex && token.kind() == SyntaxKind::Identifier {
+        return repeater_binding(document_cache, &node);
+    }
     if node.kind() == SyntaxKind::SubElement && token.kind() == SyntaxKind::Identifier {
         let url = token.source_file.path().to_url()?;
         let element = document_cache.element_at_offset(&url, token.text_range().start())?;
@@ -421,6 +445,9 @@ pub fn token_info(document_cache: &crate::DocumentCache, token: SyntaxToken) -> 
                 return None;
             }
             let parent = node.parent()?;
+            if parent.kind() == SyntaxKind::RepeatedElement {
+                return repeater_binding(document_cache, &node);
+            }
             if matches!(
                 parent.kind(),
                 SyntaxKind::PropertyChangedCallback | SyntaxKind::PropertyDeclaration

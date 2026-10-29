@@ -1387,6 +1387,26 @@ fn get_document_symbols(
                 })
             })
             .collect();
+        if let Some(repeated) = editor_preview::ElementRcNode::new(elem.clone(), 0)?
+            .with_decorated_node(syntax_nodes::RepeatedElement::new)
+        {
+            for binding in [
+                repeated.DeclaredIdentifier().map(SyntaxNode::from),
+                repeated.RepeatedIndex().map(SyntaxNode::from),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                let Some(id) = binding.child_token(SyntaxKind::Identifier) else { continue };
+                r.push(DocumentSymbol {
+                    name: id.text().into(),
+                    kind: lsp_types::SymbolKind::VARIABLE,
+                    range: declaration_range(&binding, format),
+                    selection_range: util::token_to_lsp_range(&id, format),
+                    ..ds.clone()
+                });
+            }
+        }
         r.extend(element.children.iter().filter_map(|child| {
             let e = child.borrow();
             let element_node = &e.debug.first()?.node;
@@ -2492,7 +2512,7 @@ export component App {
     fn test_document_symbols_conditional_and_repeated_elements() {
         let conditional =
             "if true: conditional := Rectangle {\n        in property <int> count: 1;\n    }";
-        let repeated = "for value in [1, 2]: repeated := Rectangle {\n        in property <int> count: value;\n    }";
+        let repeated = "for value[index] in [1, 2]: repeated := Rectangle {\n        in property <int> count: value + index;\n    }";
         let source = format!(
             "component App {{\n    /* 😀 */ {conditional}\n    {repeated}\n    after := Rectangle {{}}\n}}"
         );
@@ -2526,11 +2546,24 @@ export component App {
                 assert_eq!(symbol.name, name);
                 assert_eq!(text(symbol.selection_range), name);
                 assert_eq!(text(symbol.range), declaration);
-                let member = &symbol.children.as_ref().unwrap()[0];
+                let member =
+                    symbol.children.as_ref().unwrap().iter().find(|s| s.name == "count").unwrap();
                 assert_eq!(member.name, "count");
                 assert_eq!(text(member.selection_range), "count");
                 assert!(member.range.start >= symbol.range.start);
                 assert!(member.range.end <= symbol.range.end);
+                if name == "repeated" {
+                    let bindings = symbol.children.as_ref().unwrap();
+                    assert_eq!(bindings.len(), 3);
+                    for (binding, name, declaration) in
+                        [(&bindings[0], "value", "value"), (&bindings[1], "index", "[index]")]
+                    {
+                        assert_eq!(binding.name, name);
+                        assert_eq!(binding.kind, lsp_types::SymbolKind::VARIABLE);
+                        assert_eq!(text(binding.selection_range), name);
+                        assert_eq!(text(binding.range), declaration);
+                    }
+                }
             }
             assert_eq!(
                 children[0].range.start.character,

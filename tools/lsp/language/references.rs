@@ -179,6 +179,7 @@ fn is_declaration(token: &SyntaxToken) -> bool {
         | SyntaxKind::InternalName
         | SyntaxKind::ExportName
         | SyntaxKind::ObjectTypeMember
+        | SyntaxKind::RepeatedIndex
         | SyntaxKind::EnumValue => true,
         _ => false,
     }
@@ -640,6 +641,81 @@ component App {
             ],
             true,
         );
+    }
+
+    #[test]
+    fn repeater_bindings_and_shadowing() {
+        let source = r#"
+component App {
+    in property <int> row-value/*property*/: 7;
+    /* 😀 */ for row-value/*outer-data*/[row-index/*outer-index*/] in [root.row_value/*model*/]: outer := Rectangle {
+        x: (row_value/*outer-use*/ + row_index/*outer-index-use*/) * 1px;
+        for row_value/*inner-data*/[row_index/*inner-index*/] in [row_value/*inner-model*/]: inner := Rectangle {
+            x: (row-value/*inner-use*/ + row-index/*inner-index-use*/) * 1px;
+        }
+        y: root.row_value/*qualified*/ * 1px;
+    }
+    for _[row-index/*index-only*/] in 2: Rectangle { x: row_index/*index-only-use*/ * 1px; }
+    x: row_value/*outside*/ * 1px;
+}"#;
+        let (mut dc, uri, diagnostics) = test::loaded_document_cache(source.into());
+        assert!(
+            diagnostics
+                .values()
+                .flatten()
+                .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+            "{diagnostics:?}"
+        );
+        let groups: &[&[&str]] = &[
+            &[
+                "row-value/*property*/",
+                "row_value/*model*/",
+                "row_value/*qualified*/",
+                "row_value/*outside*/",
+            ],
+            &["row-value/*outer-data*/", "row_value/*outer-use*/", "row_value/*inner-model*/"],
+            &["row-index/*outer-index*/", "row_index/*outer-index-use*/"],
+            &["row_value/*inner-data*/", "row-value/*inner-use*/"],
+            &["row_index/*inner-index*/", "row-index/*inner-index-use*/"],
+            &["row-index/*index-only*/", "row_index/*index-only-use*/"],
+        ];
+        for format in
+            [crate::editor_preview::ByteFormat::Utf8, crate::editor_preview::ByteFormat::Utf16]
+        {
+            dc.format = format;
+            for (group_index, group) in groups.iter().enumerate() {
+                for query in *group {
+                    check(&dc, &uri, source, query, group, true);
+                    check(&dc, &uri, source, query, &group[1..], false);
+                    if group_index > 0 {
+                        let doc = dc.get_document(&uri).unwrap().node.as_ref().unwrap();
+                        let token = crate::language::token_at_offset(
+                            doc,
+                            TextSize::new(source.find(query).unwrap() as u32),
+                        )
+                        .unwrap();
+                        assert!(crate::editor_preview::editing::rename_component::find_declaration_node(&dc, &token).is_none());
+                        let lsp_types::GotoDefinitionResponse::Link(links) =
+                            crate::language::goto::goto_definition(&mut dc, token.clone()).unwrap()
+                        else {
+                            panic!("expected definition link")
+                        };
+                        let expected = location(&dc, &uri, source, group[0]);
+                        assert_eq!(links[0].target_uri, uri);
+                        assert_eq!(links[0].target_selection_range.start, expected.range.start);
+                        let hover = crate::language::hover::get_tooltip(&mut dc, token).unwrap();
+                        let lsp_types::HoverContents::Markup(contents) = hover.contents else {
+                            panic!("expected markup")
+                        };
+                        assert!(contents.value.contains(if group[0].contains("index") {
+                            "row-index: int"
+                        } else {
+                            "row-value:"
+                        }));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

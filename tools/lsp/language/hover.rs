@@ -90,6 +90,10 @@ pub fn get_tooltip(
             let name = elem.borrow().repeated.as_ref()?.model_data_id.clone();
             from_slint_code(&format!("{name}: {ty}"), documentation)
         }
+        TokenInfo::ModelIndex(elem) => {
+            let name = elem.borrow().repeated.as_ref()?.index_id.clone();
+            from_slint_code(&format!("{name}: int"), documentation)
+        }
         TokenInfo::IncompleteNamedReference(el, name) => {
             from_property_in_type(&el, &name, documentation)?
         }

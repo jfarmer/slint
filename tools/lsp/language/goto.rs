@@ -6,7 +6,7 @@ use crate::editor_preview::{
     token_info::{TokenInfo, token_info},
 };
 use crate::util;
-use i_slint_compiler::parser::{SyntaxNode, SyntaxToken};
+use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken};
 use lsp_types::{GotoDefinitionResponse, LocationLink, Position, Range};
 
 pub fn goto_definition(
@@ -46,6 +46,11 @@ fn goto_node(
     format: editor_preview::ByteFormat,
 ) -> Option<GotoDefinitionResponse> {
     let (target_uri, range) = crate::util::node_to_url_and_lsp_range(node, format)?;
+    let range = if node.kind() == SyntaxKind::RepeatedIndex {
+        util::token_to_lsp_range(&node.child_token(SyntaxKind::Identifier)?, format)
+    } else {
+        range
+    };
     let range = Range::new(range.start, range.start); // Shrink range to a position:-)
     Some(GotoDefinitionResponse::Link(vec![LocationLink {
         origin_selection_range: None,

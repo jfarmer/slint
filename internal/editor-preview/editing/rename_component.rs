@@ -768,6 +768,14 @@ struct DeclarationNodeQuery {
 impl DeclarationNodeQuery {
     fn new(document_cache: &crate::DocumentCache, token: SyntaxToken) -> Option<Self> {
         let info = crate::token_info::token_info(document_cache, token.clone())?;
+        // Repeater renames also need lexical collision and capture checks.
+        if matches!(
+            info,
+            crate::token_info::TokenInfo::ModelData(_)
+                | crate::token_info::TokenInfo::ModelIndex(_)
+        ) {
+            return None;
+        }
         let name = i_slint_compiler::parser::normalize_identifier(token.text());
 
         let node = token.parent();
