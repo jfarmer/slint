@@ -10,7 +10,7 @@ use i_slint_compiler::element_type::{BuiltinElement, ElementDocEntry, ElementTyp
 use i_slint_compiler::expression_tree::Expression;
 use i_slint_compiler::langtype::Type;
 use i_slint_compiler::object_tree::ElementRc;
-use i_slint_compiler::parser::{SyntaxKind, SyntaxNode, SyntaxToken};
+use i_slint_compiler::parser::{SyntaxNode, SyntaxToken};
 use itertools::Itertools as _;
 use lsp_types::{Hover, HoverContents, MarkupContent};
 use std::rc::Rc;
@@ -101,63 +101,20 @@ pub fn get_tooltip(
     })
 }
 
-// Given a token that declares something, find a comment before that token that could be a documentation for this
 fn extract_documentation(declaration: &SyntaxNode) -> Option<String> {
-    let mut token = declaration.first_token()?;
-    // Loop back to find the the previous line \n
-    loop {
-        if token.kind() == SyntaxKind::Whitespace {
-            let mut ln = token.text().bytes().filter(|c| *c == b'\n');
-            // One \n
-            if ln.next().is_some() {
-                // Two \n
-                if ln.next().is_some() {
-                    return None;
-                }
-                token = token.prev_token()?;
-                break;
-            }
-        }
-        token = token.prev_token()?;
-    }
-
-    // find the comment
-    let mut result = String::new();
-    while token.kind() == SyntaxKind::Comment {
-        let text = token.text().to_string();
-        token = if let Some(token) = token.prev_token() { token } else { break };
-        if token.kind() == SyntaxKind::Whitespace {
-            let mut ln = token.text().bytes().filter(|c| *c == b'\n');
-            // One \n
-            if ln.next().is_some() {
-                result = format!("{}{text}{result}", token.text());
-                // Two \n
-                if ln.next().is_some() {
-                    break;
-                }
-                token = if let Some(token) = token.prev_token() { token } else { break };
-                continue;
-            }
-        }
-        break;
-    }
-
-    if result.is_empty() {
-        return None;
-    }
-
-    // De-ident the comment
+    let range = super::documentation::documentation_range(declaration)?;
+    let source = declaration.source_file.source()?;
+    let start = usize::from(range.start());
+    let line_start = source[..start].rfind('\n').map_or(0, |offset| offset + 1);
+    let result = &source[line_start..usize::from(range.end())];
     let indentation_size =
         result.lines().filter_map(|x| x.find(|x| x != ' ' && x != '\t')).min()?;
     let mut result2 = String::new();
-    for line in result.lines().skip_while(|p| p.trim().is_empty()) {
+    for line in result.lines() {
         if line.len() > indentation_size {
             result2.push_str(line[indentation_size..].trim_end());
         }
         result2.push('\n');
-    }
-    if result2.ends_with("\n\n") {
-        result2.pop(); // remove the last newline
     }
     Some(result2)
 }
@@ -601,11 +558,7 @@ export component Test { // not docs
             get_tooltip(&mut dc, find_tk("Eee.E2", 0.into())),
             "```slint\n/// Here some docs for Eee\nenum Eee\n```",
         );
-        // FIXME: We get the comments for the enum instead of the value
-        assert_tooltip(
-            get_tooltip(&mut dc, find_tk("Eee.E2", 5.into())),
-            "```slint\n/// Here some docs for Eee\nEee.E2\n```",
-        );
+        assert_tooltip(get_tooltip(&mut dc, find_tk("Eee.E2", 5.into())), "```slint\nEee.E2\n```");
     }
 
     #[test]

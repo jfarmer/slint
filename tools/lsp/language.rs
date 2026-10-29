@@ -5,6 +5,7 @@
 
 mod code_actions;
 pub mod completion;
+mod documentation;
 mod formatting;
 mod goto;
 mod hover;
@@ -1323,11 +1324,11 @@ fn get_document_symbols(
         node: &SyntaxNode,
         format: editor_preview::ByteFormat,
     ) -> lsp_types::Range {
-        let node = node
-            .parent()
-            .filter(|p| p.kind() == SyntaxKind::ExportsList)
-            .unwrap_or_else(|| node.clone());
-        util::node_to_lsp_range(&node, format)
+        util::text_range_to_lsp_range(
+            &node.source_file,
+            documentation::declaration_range(node),
+            format,
+        )
     }
 
     fn type_children(
@@ -1348,11 +1349,7 @@ fn get_document_symbols(
                 Some(DocumentSymbol {
                     name: id.text().into(),
                     kind,
-                    range: util::text_range_to_lsp_range(
-                        &member.source_file,
-                        util::node_range_without_trailing_ws(&member),
-                        format,
-                    ),
+                    range: declaration_range(&member, format),
                     selection_range: util::token_to_lsp_range(&id, format),
                     ..ds.clone()
                 })
@@ -1384,7 +1381,7 @@ fn get_document_symbols(
                 Some(DocumentSymbol {
                     name,
                     kind,
-                    range: util::node_to_lsp_range(&node, format),
+                    range: declaration_range(&node, format),
                     selection_range: util::node_to_lsp_range(&id, format),
                     ..ds.clone()
                 })
@@ -1403,7 +1400,7 @@ fn get_document_symbols(
             };
             Some(DocumentSymbol {
                 range: editor_preview::ElementRcNode::new(child.clone(), 0)?
-                    .with_decorated_node(|node| util::node_to_lsp_range(&node, format)),
+                    .with_decorated_node(|node| declaration_range(&node, format)),
                 selection_range,
                 name: id.as_ref().map_or_else(|| e.base_type.to_string(), |id| id.text().into()),
                 detail: id.map(|_| e.base_type.to_string()),
@@ -2297,6 +2294,109 @@ enum {}
         assert_eq!(tree!(1 1 1 0).name, "ta");
         assert_eq!(tree!(1 1 1 0).detail, Some("TouchArea".into()));
         check_start_with(tree!(1 1 1 0).range.start, "ta := TouchArea");
+    }
+
+    #[test]
+    fn test_document_symbols_documentation() {
+        let source = r#"// File header.
+
+// Component docs.
+export component App {
+    // Property docs.
+    in property <int> value;
+    /** Callback docs. */
+    callback fired;
+    // Function docs.
+    public function run() {}
+    // Element docs.
+    child := Rectangle {}
+}
+// Global docs.
+export global Settings {}
+// Struct docs.
+export struct Data {
+    // Field docs.
+    field: int,
+}
+// Enum docs.
+export enum Choice {
+    // Variant docs.
+    first, second
+}
+"#;
+        let (mut dc, uri, _) = loaded_document_cache(source.into());
+        let DocumentSymbolResponse::Nested(symbols) =
+            get_document_symbols(&mut dc, &lsp_types::TextDocumentIdentifier { uri: uri.clone() })
+                .unwrap()
+        else {
+            panic!("expected nested symbols")
+        };
+        let text = |range: lsp_types::Range| {
+            let (_, start) = dc.get_document_and_offset(&uri, &range.start).unwrap();
+            let (_, end) = dc.get_document_and_offset(&uri, &range.end).unwrap();
+            &source[usize::from(start)..usize::from(end)]
+        };
+        for (symbol, prefix) in symbols.iter().zip([
+            "// Component docs.\nexport component App",
+            "// Global docs.\nexport global Settings",
+            "// Struct docs.\nexport struct Data",
+            "// Enum docs.\nexport enum Choice",
+        ]) {
+            assert!(text(symbol.range).starts_with(prefix), "{symbol:?}");
+            assert_eq!(text(symbol.selection_range), symbol.name);
+        }
+        for (symbol, expected) in symbols[0].children.as_ref().unwrap().iter().zip([
+            "// Property docs.\n    in property <int> value;",
+            "/** Callback docs. */\n    callback fired;",
+            "// Function docs.\n    public function run() {}",
+            "// Element docs.\n    child := Rectangle {}",
+        ]) {
+            assert_eq!(text(symbol.range), expected);
+            assert_eq!(text(symbol.selection_range), symbol.name);
+        }
+        let field = &symbols[2].children.as_ref().unwrap()[0];
+        assert_eq!(text(field.range), "// Field docs.\n    field: int,");
+        let variants = symbols[3].children.as_ref().unwrap();
+        assert_eq!(text(variants[0].range), "// Variant docs.\n    first");
+        assert_eq!(text(variants[1].range), "second");
+    }
+
+    #[test]
+    fn test_document_symbols_separate_documentation() {
+        let source = r#"// First docs.
+export component First {} // Trailing comment.
+export component Second {}
+// Unattached comment.
+
+export component Third {
+    callback first; // Trailing member comment.
+    callback second;
+    /* Inline comment. */ callback third;
+}
+"#;
+        let (mut dc, uri, _) = loaded_document_cache(source.into());
+        let DocumentSymbolResponse::Nested(symbols) =
+            get_document_symbols(&mut dc, &lsp_types::TextDocumentIdentifier { uri: uri.clone() })
+                .unwrap()
+        else {
+            panic!("expected nested symbols")
+        };
+        assert_eq!(symbols[0].range.start, Position::new(0, 0));
+        assert_eq!(symbols[1].range.start, Position::new(2, 0));
+        assert_eq!(symbols[2].range.start, Position::new(5, 0));
+        for (symbol, (line, column)) in
+            symbols[2].children.as_ref().unwrap().iter().zip([(6, 4), (7, 4), (8, 26)])
+        {
+            assert_eq!(symbol.range.start, Position::new(line, column));
+        }
+        let doc = dc.get_document(&uri).unwrap().node.clone().unwrap();
+        let token =
+            token_at_offset(&doc, TextSize::new(source.find("First {}").unwrap() as u32)).unwrap();
+        let tooltip = hover::get_tooltip(&mut dc, token).unwrap();
+        let lsp_types::HoverContents::Markup(contents) = tooltip.contents else {
+            panic!("expected markup")
+        };
+        assert!(contents.value.contains("// First docs."));
     }
 
     #[test]
